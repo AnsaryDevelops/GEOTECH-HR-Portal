@@ -1,0 +1,1041 @@
+<title>GEOTECH HR Portal Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --ink:#16191D;
+  --ink-2:#3A3E42;
+  --ink-3:#63676B;
+  --ground:#EEF0EE;
+  --surface:#FAFBFA;
+  --surface-2:#E4E7E4;
+  --rule:#CFD4CF;
+  --rule-soft:#DDE1DD;
+  --ochre:#B8862F;
+  --ochre-deep:#8C6420;
+  --crit:#9E2B25;
+  --high:#C4622D;
+  --med:#4E6E70;
+  --low:#7C8285;
+  --good:#3F6B4A;
+  --shadow:rgba(22,25,29,.07);
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"Archivo","Helvetica Neue",Arial,sans-serif;
+  --serif:"Source Serif 4",Georgia,"Times New Roman",serif;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ink:#E8EAE7;
+    --ink-2:#B4B8B4;
+    --ink-3:#8A8F8B;
+    --ground:#141715;
+    --surface:#1B1F1D;
+    --surface-2:#252A27;
+    --rule:#333935;
+    --rule-soft:#282D2A;
+    --ochre:#D6A445;
+    --ochre-deep:#E8BC63;
+    --crit:#D9584F;
+    --high:#E0894B;
+    --med:#7BA5A7;
+    --low:#9AA0A0;
+    --good:#6FA37D;
+    --shadow:rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"]{
+  --ink:#E8EAE7;
+  --ink-2:#B4B8B4;
+  --ink-3:#8A8F8B;
+  --ground:#141715;
+  --surface:#1B1F1D;
+  --surface-2:#252A27;
+  --rule:#333935;
+  --rule-soft:#282D2A;
+  --ochre:#D6A445;
+  --ochre-deep:#E8BC63;
+  --crit:#D9584F;
+  --high:#E0894B;
+  --med:#7BA5A7;
+  --low:#9AA0A0;
+  --good:#6FA37D;
+  --shadow:rgba(0,0,0,.4);
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--ground);
+  color:var(--ink);
+  font-family:var(--serif);
+  font-size:17px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1140px;margin:0 auto;padding:0 28px 120px}
+
+/* ── masthead ─────────────────────────────── */
+.mast{
+  padding:64px 0 40px;
+  border-bottom:2px solid var(--ink);
+  margin-bottom:0;
+}
+.mast-kicker{
+  font-family:var(--sans);
+  font-size:11.5px;
+  font-weight:600;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:var(--ochre-deep);
+  display:flex;
+  gap:14px;
+  align-items:center;
+  flex-wrap:wrap;
+  margin-bottom:22px;
+}
+.mast-kicker span:not(:last-child)::after{
+  content:"";
+  display:inline-block;
+  width:4px;height:4px;
+  border-radius:50%;
+  background:var(--rule);
+  margin-left:14px;
+  vertical-align:middle;
+}
+h1{
+  font-family:var(--sans);
+  font-weight:800;
+  font-size:clamp(2.5rem,6.2vw,4.4rem);
+  line-height:.98;
+  letter-spacing:-.032em;
+  margin:0 0 24px;
+  text-wrap:balance;
+}
+.standfirst{
+  font-size:clamp(1.06rem,1.9vw,1.28rem);
+  line-height:1.5;
+  color:var(--ink-2);
+  max-width:62ch;
+  margin:0;
+}
+.standfirst strong{color:var(--ink);font-weight:600}
+
+/* ── verdict band ─────────────────────────── */
+.verdict{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:0;
+  border-bottom:1px solid var(--rule);
+  margin-bottom:56px;
+}
+.vcell{
+  padding:26px 22px 24px;
+  border-right:1px solid var(--rule-soft);
+}
+.vcell:last-child{border-right:none}
+.vnum{
+  font-family:var(--sans);
+  font-size:2.6rem;
+  font-weight:800;
+  line-height:1;
+  letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;
+  display:block;
+  margin-bottom:8px;
+}
+.vnum.crit{color:var(--crit)}
+.vnum.high{color:var(--high)}
+.vnum.ochre{color:var(--ochre-deep)}
+.vlabel{
+  font-family:var(--sans);
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:.11em;
+  text-transform:uppercase;
+  color:var(--ink-3);
+  line-height:1.35;
+}
+
+/* ── strata sections ──────────────────────── */
+section{margin-bottom:76px;scroll-margin-top:24px}
+.shead{
+  display:grid;
+  grid-template-columns:64px 1fr;
+  gap:0 24px;
+  align-items:start;
+  border-top:2px solid var(--ink);
+  padding-top:18px;
+  margin-bottom:32px;
+}
+.depth{
+  font-family:var(--mono);
+  font-size:12px;
+  font-weight:600;
+  color:var(--ochre-deep);
+  letter-spacing:.04em;
+  padding-top:9px;
+  font-variant-numeric:tabular-nums;
+}
+h2{
+  font-family:var(--sans);
+  font-weight:700;
+  font-size:clamp(1.6rem,3.2vw,2.15rem);
+  line-height:1.1;
+  letter-spacing:-.024em;
+  margin:0 0 8px;
+  text-wrap:balance;
+}
+.sdek{
+  font-size:1.02rem;
+  color:var(--ink-3);
+  margin:0;
+  max-width:70ch;
+  line-height:1.5;
+}
+.body{padding-left:88px}
+@media (max-width:760px){
+  .shead{grid-template-columns:1fr;gap:6px}
+  .depth{padding-top:0}
+  .body{padding-left:0}
+}
+h3{
+  font-family:var(--sans);
+  font-weight:700;
+  font-size:1.12rem;
+  letter-spacing:-.01em;
+  margin:38px 0 12px;
+  text-wrap:balance;
+}
+h3:first-child{margin-top:0}
+h4{
+  font-family:var(--sans);
+  font-size:11.5px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--ink-3);
+  margin:30px 0 12px;
+}
+p{margin:0 0 16px;max-width:68ch}
+p:last-child{margin-bottom:0}
+a{color:var(--ochre-deep);text-decoration-thickness:1px;text-underline-offset:2px}
+strong{font-weight:600}
+code,.mono{
+  font-family:var(--mono);
+  font-size:.855em;
+  background:var(--surface-2);
+  padding:.12em .38em;
+  border-radius:3px;
+  word-break:break-word;
+}
+
+/* ── the chain ────────────────────────────── */
+.chain{
+  list-style:none;
+  padding:0;
+  margin:0 0 8px;
+  counter-reset:ch;
+  border-left:3px solid var(--crit);
+}
+.chain li{
+  counter-increment:ch;
+  position:relative;
+  padding:14px 0 14px 56px;
+  border-bottom:1px solid var(--rule-soft);
+  max-width:74ch;
+}
+.chain li:last-child{border-bottom:none}
+.chain li::before{
+  content:counter(ch);
+  position:absolute;
+  left:18px;top:15px;
+  font-family:var(--mono);
+  font-size:12px;
+  font-weight:600;
+  color:var(--crit);
+  font-variant-numeric:tabular-nums;
+}
+.chain b{font-family:var(--sans);font-weight:600;font-size:.97em}
+
+/* ── split-brain diagram ──────────────────── */
+.brain{
+  display:grid;
+  grid-template-columns:1fr 88px 1fr;
+  align-items:stretch;
+  gap:0;
+  margin:8px 0 26px;
+  border:1px solid var(--rule);
+  background:var(--surface);
+  overflow:hidden;
+}
+.brain-col{padding:22px 20px}
+.brain-col.mid{
+  border-left:1px solid var(--rule);
+  border-right:1px solid var(--rule);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+  padding:22px 8px;
+  background:var(--surface-2);
+}
+.brain-title{
+  font-family:var(--sans);
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  margin-bottom:14px;
+}
+.brain-title.live{color:var(--good)}
+.brain-title.dead{color:var(--crit)}
+.brain ul{list-style:none;padding:0;margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.9}
+.brain ul li{color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gap-mark{
+  font-family:var(--sans);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--crit);
+  writing-mode:vertical-rl;
+  text-orientation:mixed;
+}
+.brain-foot{
+  border-top:1px solid var(--rule);
+  padding:12px 20px;
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--ink-3);
+  grid-column:1/-1;
+  background:var(--surface-2);
+}
+@media (max-width:700px){
+  .brain{grid-template-columns:1fr}
+  .brain-col.mid{border-left:none;border-right:none;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:12px}
+  .gap-mark{writing-mode:horizontal-tb}
+}
+
+/* ── findings register ────────────────────── */
+.find{
+  border-left:3px solid var(--low);
+  padding:15px 0 15px 20px;
+  margin-bottom:2px;
+  background:var(--surface);
+  border-bottom:1px solid var(--rule-soft);
+  max-width:none;
+}
+.find.c{border-left-color:var(--crit)}
+.find.h{border-left-color:var(--high)}
+.find.m{border-left-color:var(--med)}
+.find-top{
+  display:flex;
+  gap:12px;
+  align-items:baseline;
+  flex-wrap:wrap;
+  margin-bottom:5px;
+}
+.sev{
+  font-family:var(--sans);
+  font-size:9.5px;
+  font-weight:700;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  padding:2.5px 7px;
+  border-radius:2px;
+  color:#fff;
+  flex-shrink:0;
+}
+.sev.c{background:var(--crit)}
+.sev.h{background:var(--high)}
+.sev.m{background:var(--med)}
+.sev.l{background:var(--low)}
+.find-t{font-family:var(--sans);font-weight:600;font-size:1rem;line-height:1.35}
+.loc{
+  font-family:var(--mono);
+  font-size:11.5px;
+  color:var(--ink-3);
+  display:block;
+  margin-bottom:7px;
+  word-break:break-all;
+}
+.find p{font-size:.94rem;line-height:1.55;color:var(--ink-2);margin:0;max-width:76ch}
+
+/* ── tables ───────────────────────────────── */
+.tw{overflow-x:auto;margin:0 0 22px;border:1px solid var(--rule);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:.9rem;min-width:600px}
+th{
+  font-family:var(--sans);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.11em;
+  text-transform:uppercase;
+  text-align:left;
+  padding:11px 14px;
+  color:var(--ink-3);
+  border-bottom:1.5px solid var(--rule);
+  white-space:nowrap;
+  background:var(--surface-2);
+}
+td{
+  padding:10px 14px;
+  border-bottom:1px solid var(--rule-soft);
+  vertical-align:top;
+  line-height:1.45;
+  color:var(--ink-2);
+}
+tr:last-child td{border-bottom:none}
+td.k{font-family:var(--sans);font-weight:600;color:var(--ink);white-space:nowrap}
+td.mn{font-family:var(--mono);font-size:12px;white-space:nowrap}
+.tag{
+  font-family:var(--sans);
+  font-size:9.5px;
+  font-weight:700;
+  letter-spacing:.09em;
+  text-transform:uppercase;
+  padding:2px 6px;
+  border-radius:2px;
+  white-space:nowrap;
+  display:inline-block;
+}
+.t-met{background:rgba(63,107,74,.15);color:var(--good)}
+.t-part{background:rgba(184,134,47,.18);color:var(--ochre-deep)}
+.t-no{background:rgba(158,43,37,.13);color:var(--crit)}
+.t-cont{background:var(--crit);color:#fff}
+.t-mock{background:rgba(196,98,45,.15);color:var(--high)}
+.t-real{background:rgba(63,107,74,.15);color:var(--good)}
+
+/* ── maturity ─────────────────────────────── */
+.mat{display:flex;flex-direction:column;gap:0;margin-bottom:22px;border:1px solid var(--rule);background:var(--surface)}
+.mrow{
+  display:grid;
+  grid-template-columns:210px 116px 1fr;
+  gap:16px;
+  align-items:center;
+  padding:13px 18px;
+  border-bottom:1px solid var(--rule-soft);
+}
+.mrow:last-child{border-bottom:none}
+.mname{font-family:var(--sans);font-weight:600;font-size:.93rem}
+.bar{display:flex;gap:3px}
+.pip{width:18px;height:9px;background:var(--surface-2);border:1px solid var(--rule)}
+.pip.on{background:var(--crit);border-color:var(--crit)}
+.pip.half{background:linear-gradient(90deg,var(--crit) 50%,var(--surface-2) 50%);border-color:var(--crit)}
+.mnote{font-size:.87rem;color:var(--ink-3);line-height:1.45}
+@media (max-width:760px){
+  .mrow{grid-template-columns:1fr;gap:6px}
+}
+
+/* ── absent modules ───────────────────────── */
+.absent{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(232px,1fr));
+  gap:1px;
+  background:var(--rule);
+  border:1px solid var(--rule);
+  margin-bottom:24px;
+}
+.ab{background:var(--surface);padding:14px 16px}
+.ab b{
+  font-family:var(--sans);
+  font-weight:600;
+  font-size:.92rem;
+  display:block;
+  margin-bottom:4px;
+}
+.ab span{font-size:.85rem;color:var(--ink-3);line-height:1.45;display:block}
+
+/* ── readiness ────────────────────────────── */
+.ready{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:8px}
+.rcell{background:var(--surface);padding:20px 18px}
+.rverdict{
+  font-family:var(--sans);
+  font-size:1.02rem;
+  font-weight:700;
+  letter-spacing:-.01em;
+  color:var(--crit);
+  margin-bottom:3px;
+}
+.rverdict.cond{color:var(--ochre-deep)}
+.rname{
+  font-family:var(--sans);
+  font-size:10.5px;
+  font-weight:600;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--ink-3);
+  margin-bottom:12px;
+}
+.rcell ul{margin:0;padding-left:17px;font-size:.87rem;line-height:1.55;color:var(--ink-2)}
+.rcell li{margin-bottom:5px}
+
+/* ── horizons ─────────────────────────────── */
+.hz{border-left:3px solid var(--ochre);padding:0 0 0 22px;margin-bottom:34px}
+.hz-h{
+  font-family:var(--sans);
+  font-weight:700;
+  font-size:1.08rem;
+  margin-bottom:3px;
+}
+.hz-goal{font-size:.94rem;color:var(--ink-3);margin-bottom:14px;font-style:italic}
+.hz ol{margin:0;padding-left:20px;font-size:.94rem;line-height:1.6}
+.hz li{margin-bottom:7px;max-width:72ch}
+.hz li b{font-family:var(--sans);font-weight:600}
+
+/* ── credit / good list ───────────────────── */
+.credit{
+  border-left:3px solid var(--good);
+  background:var(--surface);
+  padding:18px 22px;
+  margin-bottom:26px;
+}
+.credit ul{margin:0;padding-left:18px;font-size:.94rem;line-height:1.6}
+.credit li{margin-bottom:6px;max-width:72ch}
+
+/* ── facts ────────────────────────────────── */
+.facts{
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.85;
+  background:var(--surface);
+  border:1px solid var(--rule);
+  padding:22px 24px;
+  overflow-x:auto;
+}
+.facts div{margin-bottom:3px;white-space:pre-wrap;word-break:break-word}
+.facts .fk{color:var(--ochre-deep);font-weight:600}
+.facts hr{border:none;border-top:1px solid var(--rule-soft);margin:14px 0}
+
+.foot{
+  border-top:2px solid var(--ink);
+  padding-top:22px;
+  margin-top:70px;
+  font-family:var(--sans);
+  font-size:12px;
+  color:var(--ink-3);
+  letter-spacing:.02em;
+  line-height:1.7;
+}
+:focus-visible{outline:2px solid var(--ochre);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-kicker">
+    <span>GEOTECH 3D</span><span>HR Portal V1</span><span>Technical &amp; HR Audit</span><span>2 September 2026</span>
+  </div>
+  <h1>A beautiful shell around a system that cannot run.</h1>
+  <p class="standfirst">The GEOTECH HR Portal is a <strong>high-fidelity UI prototype</strong> with a competent, unconnected Postgres schema bolted to the side. The React app makes <strong>zero database calls</strong>. No login can succeed. No request can be submitted. The repository has no entry point and cannot be built into a running site. Judged as an HR system rather than as a demo, seven expert lenses put it at an average maturity of <strong>1.1 out of 5</strong>.</p>
+</header>
+
+<div class="verdict">
+  <div class="vcell"><span class="vnum crit">23</span><span class="vlabel">Critical<br>defects</span></div>
+  <div class="vcell"><span class="vnum high">49</span><span class="vlabel">High<br>defects</span></div>
+  <div class="vcell"><span class="vnum">188</span><span class="vlabel">Total defects<br>logged</span></div>
+  <div class="vcell"><span class="vnum ochre">0</span><span class="vlabel">Supabase calls<br>in App.tsx</span></div>
+  <div class="vcell"><span class="vnum ochre">4/5</span><span class="vlabel">DB tables never<br>read or written</span></div>
+  <div class="vcell"><span class="vnum crit">1.1</span><span class="vlabel">Mean HRIS<br>maturity /5</span></div>
+</div>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s1">
+  <div class="shead">
+    <div class="depth">01</div>
+    <div>
+      <h2>What this actually is</h2>
+      <p class="sdek">A Figma Make export, three overlapping copies of the same source, and a database nobody talks to.</p>
+    </div>
+  </div>
+  <div class="body">
+    <p>The package is a <strong>Figma Make export</strong> — <code>package.json</code> still names it <code>@figma/my-make-file</code>. It contains a single 4,632-line <code>App.tsx</code> holding the entire product: design system, application shell, routing, and all nineteen screens. Alongside it sits a genuinely well-written five-migration Supabase schema with row-level security on every table.</p>
+    <p>The two never meet. <code>grep -c supabase src/app/App.tsx</code> returns <strong>0</strong>. The only PostgREST call in the whole codebase is one <code>profiles</code> SELECT in <code>src/lib/auth.ts:50</code>. Every employee, request, notification and leave type lives in <code>sessionStorage</code> — per browser tab, destroyed when the tab closes.</p>
+
+    <h4>Inventory</h4>
+    <div class="tw"><table>
+      <thead><tr><th>Path</th><th>Size</th><th>What it is</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td class="mn">src/app/App.tsx</td><td class="mn">183 KB</td><td>The entire application — 4,632 lines</td><td><span class="tag t-real">Authoritative</span></td></tr>
+        <tr><td class="mn">src/lib/store.ts</td><td class="mn">11 KB</td><td>Data layer + validation, sessionStorage-backed</td><td><span class="tag t-mock">Mock</span></td></tr>
+        <tr><td class="mn">src/lib/auth.ts</td><td class="mn">6.5 KB</td><td>Supabase auth, employee-number → synthetic email</td><td><span class="tag t-part">Half-wired</span></td></tr>
+        <tr><td class="mn">src/lib/supabase.ts</td><td class="mn">251 B</td><td>Client, constructed with empty-string fallbacks</td><td><span class="tag t-part">Fragile</span></td></tr>
+        <tr><td class="mn">supabase/migrations/*.sql</td><td class="mn">36 KB</td><td>5 migrations: schema, RLS + seed, 2 hardening, 1 correction</td><td><span class="tag t-no">Unused</span></td></tr>
+        <tr><td class="mn">src_extracted/</td><td class="mn">592 KB</td><td>Dead duplicate of the whole app, pre-Supabase</td><td><span class="tag t-no">Hazard</span></td></tr>
+        <tr><td class="mn">src.zip</td><td class="mn">594 KB</td><td>Third copy, committed as a binary</td><td><span class="tag t-no">Hazard</span></td></tr>
+        <tr><td class="mn">src/imports/pasted_text/*.md</td><td class="mn">47 KB</td><td>The five original requirement specs</td><td><span class="tag t-real">Reference</span></td></tr>
+      </tbody>
+    </table></div>
+    <p>There is no <code>README</code>, no <code>.git</code>, no tests, no CI, no lint config, no typechecker, and no <code>index.html</code>.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s2">
+  <div class="shead">
+    <div class="depth">02</div>
+    <div>
+      <h2>The split brain</h2>
+      <p class="sdek">Authentication reaches a real server. Everything else never leaves the browser tab.</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="brain">
+      <div class="brain-col">
+        <div class="brain-title live">Server side — reached</div>
+        <ul>
+          <li>supabase.auth.signInWithPassword</li>
+          <li>profiles &nbsp;(SELECT, one row)</li>
+        </ul>
+      </div>
+      <div class="brain-col mid"><span class="gap-mark">No bridge</span></div>
+      <div class="brain-col">
+        <div class="brain-title dead">Server side — never touched</div>
+        <ul>
+          <li>requests</li>
+          <li>notifications</li>
+          <li>leave_types</li>
+          <li>audit_logs</li>
+        </ul>
+      </div>
+      <div class="brain-foot">sessionStorage["hr_portal_store_v2"] &nbsp;→&nbsp; requests · notifications · employees · leaveTypes · nextSeq · nextEmpSeq · nextLeaveTypeSeq</div>
+    </div>
+    <p>The identity used on the left and the identity used on the right are <strong>different key spaces</strong>. <code>auth.ts</code> returns <code>session.user.id</code> as the profiles <strong>UUID</strong>. <code>store.ts</code> keys every employee, manager relationship and request by the string <strong><code>"EMP-00002"</code></strong>. All eighteen lookup sites in <code>App.tsx</code> compare one against the other.</p>
+    <p>The correct join key, <code>session.user.employeeNumber</code>, exists on the session object and is <strong>never used as a lookup</strong> anywhere in the application.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s3">
+  <div class="shead">
+    <div class="depth">03</div>
+    <div>
+      <h2>Why nothing works</h2>
+      <p class="sdek">Seven independent failures, any one of which alone would stop the product.</p>
+    </div>
+  </div>
+  <div class="body">
+    <ol class="chain">
+      <li><b>No login is possible.</b> <code>grep "INSERT INTO auth" supabase/migrations/</code> returns nothing. No <code>auth.users</code> row is ever created by any migration, so <code>signIn</code> authenticates <code>EMP-00001@hr.company.internal</code> against a GoTrue instance that has no such user.</li>
+      <li><b>Even provisioned users cannot match.</b> The eight seeded profiles carry hand-written UUIDs (<code>a0000000-…-000000000001</code>) that can never equal a real <code>auth.uid()</code>. The profile lookup returns null, and the user is shown <em>"Your account is inactive. Please contact HR"</em> — the wrong error entirely.</li>
+      <li><b>Identity spaces do not intersect.</b> With a hand-fixed login, <code>getManagerForEmployee(employees, &lt;uuid&gt;)</code> returns null for everyone. Every employee attempting a request is met with <em>"No active manager assigned. Contact HR."</em> <strong>No request can ever be created.</strong></li>
+      <li><b>My Team is permanently empty.</b> <code>getTeamForManager(employees, session.user.id)</code> filters <code>managerId === &lt;uuid&gt;</code> against <code>"EMP-00002"</code> values. Always zero rows, for every manager.</li>
+      <li><b>The session never survives a refresh.</b> <code>subscribeToAuthChanges</code> is exported and has <strong>zero callers</strong>, so <code>ensureAuthListener()</code> never runs. Every page refresh or deep link logs the user out, while a live JWT keeps auto-refreshing in localStorage.</li>
+      <li><b>HR account operations are placebos.</b> <code>createHRUserCredential</code> and <code>updateHRUserCredential</code> are documented empty functions. HR creates an employee, sees "Employee created successfully" — and that person can never log in. Deactivation revokes nothing.</li>
+      <li><b>The repository cannot be run or deployed.</b> There is no <code>index.html</code>, no <code>createRoot</code> call, and <code>vite.config.ts</code> is configured as a <strong>library</strong> build. <code>src/index.ts</code> exports <code>AppShell</code> but not <code>App</code>. The only npm script is <code>build</code>.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s4">
+  <div class="shead">
+    <div class="depth">04</div>
+    <div>
+      <h2>Verified defect register</h2>
+      <p class="sdek">Every item below was read in source and confirmed against surrounding context. Location is file and line.</p>
+    </div>
+  </div>
+  <div class="body">
+
+    <h4>Security</h4>
+    <div class="find c">
+      <div class="find-top"><span class="sev c">Critical</span><span class="find-t">Any employee can read any other employee's request</span></div>
+      <span class="loc">src/app/App.tsx:2433 — EmployeeRequestDetailPage</span>
+      <p>The page does <code>requests.find(r =&gt; r.id === id)</code> and renders it with no ownership check. The manager equivalent at line 3241 correctly redirects on <code>request.managerId !== session.user.id</code>; the employee page is simply missing the matching guard. Navigating to <code>/employee/requests/&lt;any-id&gt;</code> exposes the free-text reason field — which for Sick and Maternity Leave is special-category health data under Egypt's PDPL 151/2020 and Article 9 GDPR.</p>
+    </div>
+    <div class="find c">
+      <div class="find-top"><span class="sev c">Critical</span><span class="find-t">All authorization is client-side; every mutation is an unauthenticated local write</span></div>
+      <span class="loc">src/app/App.tsx — ProtectedRoute:1732, RoleRoute:1738; store.ts:162 saveStore</span>
+      <p>Role gating, team scoping, request ownership and approve/reject are React state comparisons in JavaScript the user controls, evaluated against a dataset in the user's own sessionStorage. The RLS policies guard nothing the UI actually reads.</p>
+    </div>
+    <div class="find c">
+      <div class="find-top"><span class="sev c">Critical</span><span class="find-t">Plaintext credentials for all eight accounts, including the HR administrator</span></div>
+      <span class="loc">src_extracted/lib/auth.ts:37-44 &nbsp;and&nbsp; src.zip → lib/auth.ts</span>
+      <p>The pre-Supabase auth module ships in two places with a hard-coded user table. The field is named <code>passwordHash</code> but stores the plaintext value. Inside <code>src.zip</code> it is invisible to line-oriented secret scanners. Values are not reproduced here; rotate all eight and delete both copies.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">Logout leaks the previous user's data to the next user in the same tab</span></div>
+      <span class="loc">src/app/App.tsx:1490 — AuthProvider.logout</span>
+      <p><code>logout</code> clears the session but never purges <code>hr_portal_store_v2</code>. On a shared workstation the next person to sign in inherits the previous user's requests, notifications and the full employee directory.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">No rate limiting over a perfectly enumerable identity space</span></div>
+      <span class="loc">src/lib/auth.ts:130 — signIn</span>
+      <p>Employee IDs are sequential <code>EMP-NNNNN</code>. There is no lockout, no CAPTCHA, no failed-attempt auditing, and no MFA. <code>session.expiresAt</code> is computed at auth.ts:83 and read nowhere.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">The whole employee roster ships in the JavaScript bundle</span></div>
+      <span class="loc">src/lib/store.ts:57-64 — DEFAULT_EMPLOYEES</span>
+      <p>Names, work emails, personal Egyptian mobile numbers, positions and the complete reporting chain are static module data, readable by anyone who can fetch the bundle.</p>
+    </div>
+
+    <h4>Database and RLS</h4>
+    <div class="find c">
+      <div class="find-top"><span class="sev c">Critical</span><span class="find-t">Notifications and audit logs are structurally unwritable by the workflow</span></div>
+      <span class="loc">supabase/migrations/20260901122725_hr_portal_phase1_1_corrections.sql</span>
+      <p>Phase 1.1 narrowed both INSERT policies to <code>WITH CHECK (is_hr())</code> and deferred writes to triggers "added in the security-hardening phase". Those triggers were never written — <code>grep "CREATE TRIGGER"</code> across all migrations returns exactly two, both <code>update_updated_at</code>. An employee therefore cannot notify their manager on submit, and a manager cannot notify the employee on decision. <code>audit_logs</code> will hold zero rows forever.</p>
+    </div>
+    <div class="find c">
+      <div class="find-top"><span class="sev c">Critical</span><span class="find-t">An employee can insert a pre-approved request naming themselves as approver</span></div>
+      <span class="loc">migrations/…122036_hr_portal_rls_and_seed.sql — requests_insert</span>
+      <p>The policy is <code>WITH CHECK (employee_id = auth.uid() OR is_hr())</code>. Nothing constrains <code>manager_id</code>, and nothing constrains <code>status</code>. A direct PostgREST call can create a request with <code>status = 'APPROVED'</code> and <code>manager_id</code> set to the employee's own id.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">is_hr() has EXECUTE revoked from every role, with no compensating GRANT</span></div>
+      <span class="loc">…122108_fix_security_warnings.sql &nbsp;+&nbsp; …122123_revoke_public_execute.sql</span>
+      <p>The first migration revokes EXECUTE from <code>anon, authenticated</code>; the second revokes it from <code>PUBLIC</code>. Its own header states it "re-grants only to the <code>authenticated</code> role" — <strong>that GRANT does not exist in the file</strong>, and <code>grep "^GRANT" supabase/migrations/*.sql</code> returns nothing. Policy expressions are evaluated as the querying user, so every policy calling <code>is_hr()</code> — which is every table — is at risk of failing with <em>permission denied for function</em>. This needs a live check against the deployed database before anything else in the SQL layer is trusted.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">The approving manager can silently rewrite the request before approving it</span></div>
+      <span class="loc">…122725_phase1_1_corrections.sql — requests_update</span>
+      <p>The header claims "only status, decided_at and decision_comment may be modified by the assigned manager." The policy actually locks four columns and leaves roughly fifteen writable — including <code>start_date</code>, <code>end_date</code> and <code>leave_type_name</code>. A manager can convert paid annual leave into unpaid leave with no trace. The <code>OR is_hr()</code> branch is entirely unconstrained.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">No decided_by column, and no updated_at on requests</span></div>
+      <span class="loc">…122001_hr_portal_schema.sql — requests</span>
+      <p>The schema records <em>when</em> a decision happened but not <em>who</em> made it. HR Request Details is specified to show "Last updated date", which does not exist. <code>decided_at</code> is stamped from the client's own browser clock.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">The hierarchy has no self-reference check and no cycle prevention</span></div>
+      <span class="loc">…122001_hr_portal_schema.sql — profiles.manager_id</span>
+      <p>The FK exists but nothing stops <code>manager_id = id</code>, and nothing stops a two-person loop. HR can create one in two clicks in the UI. Any future recursive org-chart query would hang.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">An employee cannot read their own manager's profile</span></div>
+      <span class="loc">…122036_rls_and_seed.sql — profiles_select</span>
+      <p><code>USING (id = auth.uid() OR manager_id = auth.uid() OR is_hr())</code> lets a manager read reports, but a report cannot read upward. The "Direct Manager" display that every spec requires is unreadable under the policy as written.</p>
+    </div>
+    <div class="find m">
+      <div class="find-top"><span class="sev m">Medium</span><span class="find-t">Deleting an auth user with requests fails hard</span></div>
+      <span class="loc">profiles → auth.users ON DELETE CASCADE vs requests → profiles ON DELETE RESTRICT</span>
+      <p>The two constraints collide. HR holds a <code>requests_delete_hr</code> hard delete over the whole record set, which is itself unlogged.</p>
+    </div>
+
+    <h4>Correctness — visible in the running UI</h4>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">Every date on the three HR screens renders the literal text "Invalid Date"</span></div>
+      <span class="loc">src/app/App.tsx:1847 fmtDate — called at 3588, 4085, 4133, 4134</span>
+      <p><code>fmtDate</code> does <code>dateStr.split("-").map(Number)</code>, expecting <code>YYYY-MM-DD</code>. It is passed <code>submittedAt</code> and <code>decidedAt</code>, which are ISO timestamps. <code>"2026-09-02T13:45:12Z".split("-")</code> yields a third element of <code>"02T13:45:12Z"</code>, which becomes <code>NaN</code>. The HR Dashboard, the HR All Requests table and HR Request Details all print <strong>Invalid Date</strong> — the first thing an HR user sees.</p>
+    </div>
+    <div class="find c">
+      <div class="find-top"><span class="sev c">Critical</span><span class="find-t">The Try Again button on My Team does not exist, and the error copy never renders</span></div>
+      <span class="loc">ErrorState defined at App.tsx:1060 — called at App.tsx:2893</span>
+      <p><code>ErrorState</code> accepts <code>{message, onRetry, className}</code>. ManagerTeamPage passes <code>{title, description, action}</code>. All three are dropped: the component falls back to its generic default message and, because <code>onRetry</code> is undefined, renders <strong>no button at all</strong>. TypeScript would have caught this; no typechecker is installed.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">A botched icon codemod put the Chrome logo in the sidebar</span></div>
+      <span class="loc">src/app/App.tsx:52 — lucide-react import</span>
+      <p>An automated rename to lucide's newer names got three wrong. <code>Chrome as Home</code> means the <strong>Dashboard nav icon for all three roles</strong> (lines 1228, 1233, 1239) is the Google Chrome logo. <code>Circle as XCircle</code> means the <strong>Rejected</strong> indicator at line 2704 is a blank circle instead of an ✗. <code>MoveVertical as MoreVertical</code> replaces the overflow menu with up/down arrows. The correct targets were <code>House</code>, <code>CircleX</code> and <code>EllipsisVertical</code>. The uncorrupted import survives only inside <code>src.zip</code>.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">Request numbers are minted from a stale closure and collide</span></div>
+      <span class="loc">src/app/App.tsx:1569, 1597 — createLeaveRequest / createMissionRequest</span>
+      <p><code>requestNumber</code> is computed from <code>store.nextSeq</code> read out of the render closure, while the counter is incremented correctly inside the updater. Two rapid submissions, or two tabs, both mint <code>REQ-00001</code>. The same pattern affects <code>EMP-</code> and <code>lt-</code> ids.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">A throw during submit locks the form at "Submitting…" forever</span></div>
+      <span class="loc">src/app/App.tsx — LeaveRequestPage:2145, MissionRequestPage:2282</span>
+      <p>There is no try/catch around the submit path and no <code>errorElement</code> on the router, so any render exception surfaces React Router's default screen with the raw message and a stack trace.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">HR "Initial Password" is a visible plaintext field that goes nowhere</span></div>
+      <span class="loc">src/app/App.tsx:3654</span>
+      <p>Rendered as <code>type="text"</code>, so it is shoulder-surfable, and it is passed to <code>createHRUserCredential</code> — an empty function. The password is neither stored nor used.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">Demoting or deactivating a manager silently strands their whole team</span></div>
+      <span class="loc">src/app/App.tsx:1673 — updateEmployee</span>
+      <p>Direct reports keep pointing at a manager who can no longer approve. Their pending requests freeze permanently, and nothing warns HR. The spec explicitly required surfacing this conflict rather than breaking relationships silently.</p>
+    </div>
+    <div class="find m">
+      <div class="find-top"><span class="sev m">Medium</span><span class="find-t">A TypeScript duplicate-identifier error ships in the source</span></div>
+      <span class="loc">src/app/App.tsx:66 vs the store.ts import at line 20</span>
+      <p><code>UserRole</code> is both imported from <code>store.ts</code> and re-declared locally — TS2440. It ships because there is no typechecker: <code>tsconfig.types.json</code> is dead config and <code>@types/react</code> is not installed.</p>
+    </div>
+
+    <h4>Accessibility, responsiveness and brand</h4>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">Request details are unreachable by keyboard or screen reader</span></div>
+      <span class="loc">src/app/App.tsx:1108 — Table</span>
+      <p><code>&lt;tr onClick&gt;</code> is the only route into a request. Across all 4,632 lines there are zero occurrences of <code>onKeyDown</code>, <code>Escape</code>, <code>aria-live</code>, <code>role="status"</code> or <code>focus()</code>. The Modal has no focus trap, no initial focus, no focus restoration and no ESC handling. Textarea, Select and DatePicker set <code>aria-invalid</code> but never link their error text, so validation messages are never announced.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">The date pickers open off-screen on a phone</span></div>
+      <span class="loc">src/app/App.tsx:2236, 2358, 2372</span>
+      <p>Date and time pairs use <code>grid grid-cols-2 gap-4</code> with no responsive prefix. At 375 px that yields 131.5 px columns, into which a fixed 272 px <code>CalendarPopover</code> anchored <code>left-0</code> opens 92 px off-screen on the End Date field. For a firm whose surveyors file mission requests from site, this is the primary device.</p>
+    </div>
+    <div class="find h">
+      <div class="find-top"><span class="sev h">High</span><span class="find-t">No Arabic, no RTL, and the wrong working week</span></div>
+      <span class="loc">src/styles/fonts.css, theme.css; App.tsx:537 DAY_NAMES</span>
+      <p><code>dir=</code> and <code>lang=</code> appear zero times. The loaded Inter subset carries no Arabic glyphs. The calendar is hard-coded Monday-first, which is the wrong week shape for Egypt — where the weekend is Friday and Saturday — even in English.</p>
+    </div>
+    <div class="find m">
+      <div class="find-top"><span class="sev m">Medium</span><span class="find-t">The brand is not GEOTECH's brand</span></div>
+      <span class="loc">src/styles/theme.css, fonts.css</span>
+      <p>All five specs mandate <strong>Graphik</strong> typography. The app loads <strong>Inter</strong> from Google Fonts. The primary colour is a generic corporate blue <code>#1d4e89</code>, not GEOTECH's gold and graphite. A complete dark theme is defined in <code>theme.css</code> and is structurally unreachable, because every surface is hard-coded <code>bg-white</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s5">
+  <div class="shead">
+    <div class="depth">05</div>
+    <div>
+      <h2>Requirements traceability</h2>
+      <p class="sdek">The four feature specs, checked line by line against what the code does.</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="tw"><table>
+      <thead><tr><th>Spec</th><th>Requirement</th><th>Status</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td class="k">auth-flow §3</td><td>Success alert must not show by default</td><td><span class="tag t-met">Met</span></td><td>Shown only after a successful result</td></tr>
+        <tr><td class="k">auth-flow §9</td><td>Remove the demo credentials panel</td><td><span class="tag t-met">Met</span></td><td>No demo panel in LoginPage:4369</td></tr>
+        <tr><td class="k">auth-flow §5</td><td>Enforce authorization at the server, not by hiding nav</td><td><span class="tag t-no">Not met</span></td><td>ProtectedRoute / RoleRoute are client state only</td></tr>
+        <tr><td class="k">auth-flow §6</td><td>Logout invalidates the session and blocks back-navigation</td><td><span class="tag t-part">Partial</span></td><td>Session cleared; store not purged</td></tr>
+        <tr><td class="k">auth-flow §11</td><td>Do not store passwords in plaintext</td><td><span class="tag t-cont">Contradicted</span></td><td>Eight plaintext accounts in src_extracted + src.zip</td></tr>
+        <tr><td class="k">request-flow §7</td><td>Employee cannot choose the approver</td><td><span class="tag t-met">Met</span></td><td>Derived at App.tsx:1557; ApproverInfo read-only</td></tr>
+        <tr><td class="k">request-flow §7</td><td>Create a notification for the direct manager</td><td><span class="tag t-part">Partial</span></td><td>Written locally; RLS forbids the real insert</td></tr>
+        <tr><td class="k">request-flow §11</td><td>Cannot re-decide an already-decided request</td><td><span class="tag t-met">Met</span></td><td>Guarded on status and manager id at 1617, 1633</td></tr>
+        <tr><td class="k">request-flow §11</td><td>Rejection comment is mandatory</td><td><span class="tag t-part">Partial</span></td><td>UI-only check; decision_comment is nullable</td></tr>
+        <tr><td class="k">request-flow §13</td><td>Requests stored in the data layer, not UI-only</td><td><span class="tag t-no">Not met</span></td><td>sessionStorage, per tab</td></tr>
+        <tr><td class="k">my-team §1</td><td>Team derived from employee.manager_id</td><td><span class="tag t-met">Met</span></td><td>getTeamForManager — correct shape, empty in practice</td></tr>
+        <tr><td class="k">my-team §7</td><td>Error state with a working Try Again</td><td><span class="tag t-no">Not met</span></td><td>Props dropped; no button renders</td></tr>
+        <tr><td class="k">my-team §8</td><td>Manager id from session, never from a URL parameter</td><td><span class="tag t-met">Met</span></td><td>No manager id is accepted from any route</td></tr>
+        <tr><td class="k">hr-admin §7</td><td>Creating an employee creates their login</td><td><span class="tag t-cont">Contradicted</span></td><td>No-op function; success message is untrue</td></tr>
+        <tr><td class="k">hr-admin §6</td><td>Manager dropdown from live active managers</td><td><span class="tag t-met">Met</span></td><td>getEligibleManagers filters role and status</td></tr>
+        <tr><td class="k">hr-admin §6</td><td>An employee cannot be their own manager</td><td><span class="tag t-no">Not met</span></td><td>No self-check in code or schema</td></tr>
+        <tr><td class="k">hr-admin §9</td><td>Role change must surface hierarchy conflicts</td><td><span class="tag t-no">Not met</span></td><td>Reports silently orphaned</td></tr>
+        <tr><td class="k">hr-admin §10</td><td>Deactivated employees cannot log in</td><td><span class="tag t-cont">Contradicted</span></td><td>updateHRUserCredential is a no-op</td></tr>
+        <tr><td class="k">hr-admin §21</td><td>Requests retain their original approver</td><td><span class="tag t-met">Met</span></td><td>managerId + managerName snapshotted at creation</td></tr>
+        <tr><td class="k">hr-admin §23</td><td>No hard-coded employees, managers or counts</td><td><span class="tag t-part">Partial</span></td><td>Counts are computed; the roster is a constant</td></tr>
+        <tr><td class="k">hr-admin §26</td><td>Usable at 390 × 844</td><td><span class="tag t-no">Not met</span></td><td>Calendar opens off-screen on End Date</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s6">
+  <div class="shead">
+    <div class="depth">06</div>
+    <div>
+      <h2>The world-class HR verdict</h2>
+      <p class="sdek">Seven expert lenses, judged against a real HRIS rather than against "is this a decent prototype".</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="mat">
+      <div class="mrow"><span class="mname">HR operations &amp; policy</span><span class="bar"><span class="pip on"></span><span class="pip half"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.5 — a request router, not leave administration</span></div>
+      <div class="mrow"><span class="mname">Compliance &amp; labour law</span><span class="bar"><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.0 — would not survive a Ministry of Manpower inspection</span></div>
+      <div class="mrow"><span class="mname">HRIS data architecture</span><span class="bar"><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.0 — one flat table playing five separate roles</span></div>
+      <div class="mrow"><span class="mname">Security &amp; data privacy</span><span class="bar"><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.0 — the shape of security, almost none of the substance</span></div>
+      <div class="mrow"><span class="mname">Employee experience</span><span class="bar"><span class="pip on"></span><span class="pip half"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.5 — coherent shell, no leave balance anywhere</span></div>
+      <div class="mrow"><span class="mname">Analytics &amp; reporting</span><span class="bar"><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.0 — no reporting surface, no export, no aggregation</span></div>
+      <div class="mrow"><span class="mname">Production engineering</span><span class="bar"><span class="pip on"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></span><span class="mnote">1.0 — cannot run, serve or deploy as shipped</span></div>
+    </div>
+
+    <h3>What an HR system needs that this does not have</h3>
+    <p>These are not missing features. They are missing <em>concepts</em> — nothing in the schema or the client can express them, and every day the system runs it destroys the history that would be needed to add them retroactively.</p>
+    <div class="absent">
+      <div class="ab"><b>Leave balances</b><span>No entitlement, accrual, carry-over or quota. An employee can request 60 days and nothing objects. Grep returns zero hits for <code>balance</code>, <code>entitle</code>, <code>accrual</code>.</span></div>
+      <div class="ab"><b>A working calendar</b><span>No holiday table, no weekend definition. <code>end_date − start_date</code> counts Friday and Saturday as leave in a country where they are the weekend.</span></div>
+      <div class="ab"><b>Cancellation</b><span>No path out of PENDING except a manager decision, and no way to cancel approved future leave. Because overlap validation blocks any date touching a PENDING or APPROVED request, a cancelled trip poisons those dates permanently.</span></div>
+      <div class="ab"><b>Delegation and escalation</b><span>Approval is a single hop to <code>manager_id</code>. When Jordan Lee takes his own leave or resigns, four people cannot submit and their pending requests freeze with no administrative escape.</span></div>
+      <div class="ab"><b>Statutory leave handling</b><span>Maternity Leave sits in the same unfiltered dropdown, routed to a line manager with a Reject button. A statutory entitlement is not a discretionary approval.</span></div>
+      <div class="ab"><b>Attachments</b><span>No file storage anywhere. Sick leave beyond a threshold requires a medical certificate in essentially every jurisdiction; there is nowhere to put one.</span></div>
+      <div class="ab"><b>Effective-dated history</b><span><code>updateEmployee</code> is <code>{...e, ...data}</code> — a destructive overwrite. Point-in-time headcount, the org chart as of last 31 December, and department composition on the date of an absence are gone forever.</span></div>
+      <div class="ab"><b>Employment lifecycle</b><span>No hire date, termination date, contract type, probation or rehire. Egyptian Labour Law 12/2003's 21→30 day service tiers cannot even be derived.</span></div>
+      <div class="ab"><b>Project and cost centre</b><span>The word "project" appears zero times in the store, the app and all five migrations. A mission carries only <code>location TEXT</code>. For a geotechnical firm, the primary reporting axis was never modelled.</span></div>
+      <div class="ab"><b>A real audit trail</b><span>The table is correctly append-only and receives nothing. There is also no <code>decided_by</code>, so who approved a request is not recorded at all.</span></div>
+      <div class="ab"><b>Reporting and export</b><span>No CSV, Excel, PDF or print view — grep for all of them returns zero. <code>recharts</code> is a declared dependency that is never imported.</span></div>
+      <div class="ab"><b>Notification delivery</b><span>Notifications exist only as in-app rows. Nobody is told anything unless they log in and look, which for an approval queue means requests sit unnoticed.</span></div>
+      <div class="ab"><b>Password reset</b><span>No flow exists, and none could work against the non-routable <code>@hr.company.internal</code> domain. Every lockout is a manual database intervention.</span></div>
+      <div class="ab"><b>Conflict awareness</b><span><code>validateMissionFields</code> receives no existing-request list, so an employee can hold approved annual leave and an approved site mission on the same day. Payroll would pay both.</span></div>
+      <div class="ab"><b>A rejection loop</b><span>Rejection is a dead end: no resubmit, no amend, no duplicate, and no withdraw path anywhere. The highest-volume real-world loop does not exist.</span></div>
+      <div class="ab"><b>Data protection posture</b><span>No region pinning on the Supabase client, health data collected in a free-text reason box, and zero hits for consent, retention, DPO or PDPL.</span></div>
+    </div>
+
+    <h3>What is genuinely well done</h3>
+    <p>The audit should be fair: the <em>intent</em> visible in this codebase is consistently better than the result, and several things here are subtleties that experienced teams get wrong.</p>
+    <div class="credit">
+      <ul>
+        <li>The approver is derived from <code>employee.manager_id</code> and the employee cannot choose it. <code>ApproverInfo</code> is read-only. This is the single most important rule in the domain and it is right.</li>
+        <li><code>managerId</code>, <code>managerName</code> and <code>leaveTypeName</code> are snapshotted onto the request at creation, so a later reorg does not rewrite history. Correct historical-approver instinct.</li>
+        <li>A surrogate UUID primary key with a separate <code>employee_number</code> business key is the right modelling call.</li>
+        <li><code>is_hr()</code> as <code>SECURITY DEFINER</code> with <code>SET search_path = public</code> correctly breaks the RLS recursion that traps most teams.</li>
+        <li><code>ON DELETE RESTRICT</code> on the request foreign keys properly refuses to orphan absence history.</li>
+        <li>The Phase 1.1 self-review found a genuine tautology bug in its own earlier policy and fixed it. That is real engineering discipline.</li>
+        <li>Approve and reject are guarded on both status and manager ownership, and the manager request-detail page has the ownership redirect the employee page is missing.</li>
+        <li>The design system is coherent and complete — nineteen screens with consistent states, and no "coming soon" placeholders anywhere.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s7">
+  <div class="shead">
+    <div class="depth">07</div>
+    <div>
+      <h2>Production readiness</h2>
+      <p class="sdek">Answering the audit spec's own three-way question.</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="ready">
+      <div class="rcell">
+        <div class="rname">Internal testing</div>
+        <div class="rverdict cond">Ready with conditions</div>
+        <ul>
+          <li>Add an <code>index.html</code> and a <code>createRoot</code> entry point</li>
+          <li>Switch <code>vite.config.ts</code> off the library build</li>
+          <li>Export <code>App</code> from <code>src/index.ts</code></li>
+          <li>Unify the identity key on <code>employeeNumber</code></li>
+          <li>Understood as a UI demo only — no real employee data</li>
+        </ul>
+      </div>
+      <div class="rcell">
+        <div class="rname">Staging</div>
+        <div class="rverdict">Not ready</div>
+        <ul>
+          <li>No data-access layer exists to stage</li>
+          <li>No <code>auth.users</code> provisioning path</li>
+          <li>Notifications and audit logs are unwritable</li>
+          <li>Session does not survive a refresh</li>
+          <li>No typecheck, tests, lint or CI</li>
+        </ul>
+      </div>
+      <div class="rcell">
+        <div class="rname">Production</div>
+        <div class="rverdict">Not ready</div>
+        <ul>
+          <li>All authorization is client-side</li>
+          <li>IDOR on employee request details</li>
+          <li>Plaintext credentials committed</li>
+          <li>Deactivation revokes no access</li>
+          <li>No legal basis, retention policy or region pinning for employee PII</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:20px">The honest framing: this is <strong>category 1</strong> in the audit spec's own taxonomy — a visual prototype — not category 2 or 3. Reaching production means writing the entire data-access layer, the auth provisioning path, and the test and delivery pipeline, none of which exist yet.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s8">
+  <div class="shead">
+    <div class="depth">08</div>
+    <div>
+      <h2>Roadmap</h2>
+      <p class="sdek">Three horizons. Do not start Horizon 2 before Horizon 1 is finished — every item below depends on the layer above it.</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="hz">
+      <div class="hz-h">Horizon 1 — Make it truthful</div>
+      <div class="hz-goal">Stop the product from claiming things that are not true. Roughly four to six weeks.</div>
+      <ol>
+        <li><b>Make it runnable.</b> Add <code>index.html</code> and a real entry point, drop the library build, add <code>dev</code>, <code>typecheck</code>, <code>lint</code> and <code>test</code> scripts. Fix the TS2440 duplicate and the three corrupted icon imports.</li>
+        <li><b>Pick one identity key.</b> Use the profiles UUID end to end, or <code>employeeNumber</code> end to end. Not both. This single change unblocks requests, My Team, notifications and every HR join.</li>
+        <li><b>Provision auth users.</b> Write the migration or edge function that creates <code>auth.users</code> rows whose ids match the seeded profiles, and implement <code>createHRUserCredential</code> server-side so HR-created employees can actually log in.</li>
+        <li><b>Move the data layer to Postgres.</b> Replace <code>store.ts</code>'s sessionStorage with real queries. Four of five tables are currently dead.</li>
+        <li><b>Fix the RLS layer.</b> Verify the <code>is_hr()</code> EXECUTE grant against a live database. Constrain <code>requests_insert</code> on <code>manager_id</code> and <code>status</code>. Write the notification and audit triggers Phase 1.1 promised. Lock <code>requests_update</code> to the three columns its own header claims. Add <code>decided_by</code> and <code>updated_at</code>.</li>
+        <li><b>Close the security holes.</b> Add the ownership guard to <code>EmployeeRequestDetailPage</code>, purge the store on logout, delete <code>src_extracted/</code> and <code>src.zip</code>, and rotate all eight credentials.</li>
+        <li><b>Wire session restore.</b> Call <code>subscribeToAuthChanges</code> and give <code>ProtectedRoute</code> a pending state so refresh does not flash-redirect to login.</li>
+        <li><b>Fix what HR sees.</b> The "Invalid Date" bug, the missing Try Again button, and the mobile calendar overflow.</li>
+      </ol>
+    </div>
+    <div class="hz">
+      <div class="hz-h">Horizon 2 — Make it an HR system</div>
+      <div class="hz-goal">Add the domain model that currently does not exist. Roughly three to four months.</div>
+      <ol>
+        <li><b>Entitlement and balance engine.</b> Leave types carry rules; employees carry balances; requests carry a computed day count. Without this the system cannot answer "how many days do I have left" or hand anything to payroll.</li>
+        <li><b>Working calendar.</b> Egyptian public holidays, a Friday–Saturday weekend, half-days. Leave duration is meaningless until this exists.</li>
+        <li><b>Employment lifecycle.</b> Hire date, contract type, probation, termination and rehire — the prerequisite for Labour Law 12/2003 service tiers.</li>
+        <li><b>Effective-dated history.</b> Stop overwriting <code>profiles</code>. Every day without this destroys reporting history permanently, so it is more urgent than its position suggests.</li>
+        <li><b>Cancellation, withdrawal and amendment.</b> Including the resubmit loop after a rejection.</li>
+        <li><b>Delegation and escalation.</b> An out-of-office deputy, an HR override, and an SLA on pending approvals.</li>
+        <li><b>Attachments and comment threads.</b> Medical certificates, and a real authored comment history rather than one overwritten nullable column.</li>
+        <li><b>Project and cost-centre dimension.</b> Missions attach to a project code, not a free-text location string. This is the axis GEOTECH's own executives will ask for first.</li>
+        <li><b>Arabic and RTL.</b> A real Arabic face, <code>dir</code> switching, and a Sunday-first calendar.</li>
+        <li><b>Working audit trail and a data-protection posture.</b> Region pinning, retention schedule, consent record, subject-access path.</li>
+      </ol>
+    </div>
+    <div class="hz">
+      <div class="hz-h">Horizon 3 — Make it excellent</div>
+      <div class="hz-goal">The things that make people prefer it to a WhatsApp message.</div>
+      <ol>
+        <li><b>Analytics.</b> Absence rate by department and project, approval turnaround by manager, leave liability for Finance, concurrent-absence risk on a project team.</li>
+        <li><b>Export everywhere.</b> CSV, Excel and PDF from every table. HR staff need this daily.</li>
+        <li><b>Email and push delivery</b>, so approvals do not sit unseen.</li>
+        <li><b>Manager bulk actions</b> and a team coverage view — the input that actually governs a leave decision.</li>
+        <li><b>Payroll and time-and-attendance hand-off.</b></li>
+        <li><b>MFA, SSO and self-service password reset</b> on a routable email domain.</li>
+        <li><b>A real mobile experience</b> for surveyors filing mission requests from site.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ -->
+<section id="s9">
+  <div class="shead">
+    <div class="depth">09</div>
+    <div>
+      <h2>Fast facts</h2>
+      <p class="sdek">Everything worth committing to memory, in one place.</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="facts">
+<div><span class="fk">Root</span>          C:\Users\pc\Desktop\claude\geotech-hr\GEOTECH-HR-System-main</div>
+<div><span class="fk">Stack</span>         React 18 · Vite 6 · Tailwind 4 · react-router 7 · @supabase/supabase-js 2</div>
+<div><span class="fk">App</span>           src/app/App.tsx — 4,632 lines, 183 KB, the entire product</div>
+<hr>
+<div><span class="fk">App.tsx map</span>   1–1220 design system · 1220–1850 shell, contexts, guards · 1850–2730 employee</div>
+<div>              2727–3492 manager · 3492–4360 HR · 4360–4572 login · 4573–4632 router</div>
+<hr>
+<div><span class="fk">Store key</span>     sessionStorage["hr_portal_store_v2"]</div>
+<div><span class="fk">Login email</span>   &lt;employeeNumber&gt;@hr.company.internal   (non-routable by design)</div>
+<div><span class="fk">Session</span>       { user: { id: profiles UUID, name, role, employeeNumber }, expiresAt }</div>
+<div><span class="fk">Store key ns</span>  EmployeeProfile.id = "EMP-00001"   ← does not match session.user.id</div>
+<hr>
+<div><span class="fk">Seed</span>          EMP-00001 Alex Morgan      EMPLOYEE  → EMP-00002</div>
+<div>              EMP-00002 Jordan Lee       MANAGER   → none</div>
+<div>              EMP-00003 Riley Chen       HR        → none</div>
+<div>              EMP-00004 Nour Khalil      EMPLOYEE  → EMP-00002</div>
+<div>              EMP-00005 Sami Hadid       EMPLOYEE  → EMP-00002</div>
+<div>              EMP-00006 Sara Mohamed     MANAGER   → none</div>
+<div>              EMP-00007 Omar Hassan      EMPLOYEE  → EMP-00006</div>
+<div>              EMP-INACTIVE Sam Park      EMPLOYEE  → EMP-00002   (INACTIVE)</div>
+<div><span class="fk">Seed UUIDs</span>    a0000000-0000-0000-0000-00000000000N — hand-written, match no auth user</div>
+<hr>
+<div><span class="fk">Leave types</span>   Annual · Sick · Emergency · Maternity · Paternity · Unpaid  (all ACTIVE)</div>
+<div><span class="fk">Departments</span>   IT · Human Resources · Finance · Operations · Sales · Marketing</div>
+<div><span class="fk">Sequences</span>     REQ-NNNNN · EMP-NNNNN · lt-N   (all minted from stale closures)</div>
+<hr>
+<div><span class="fk">Migrations</span>    20260901122001  schema — 5 tables, 2 sequences, 3 functions, 2 triggers</div>
+<div>              20260901122036  RLS + seed — all policies, 8 profiles, 6 leave types</div>
+<div>              20260901122108  fix security warnings — search_path, revoke EXECUTE</div>
+<div>              20260901122123  revoke PUBLIC execute — header promises a GRANT it omits</div>
+<div>              20260901122725  phase 1.1 — auth FK, tightens 4 policies</div>
+<hr>
+<div><span class="fk">No-ops</span>        auth.ts createHRUserCredential() · updateHRUserCredential()</div>
+<div><span class="fk">Dead export</span>   auth.ts subscribeToAuthChanges — zero callers</div>
+<div><span class="fk">Missing</span>       index.html · createRoot · dev script · tests · CI · lint · README · .git</div>
+<div><span class="fk">Unused deps</span>   recharts · react-dnd · embla · vaul · sonner · cmdk · date-fns · and more</div>
+    </div>
+  </div>
+</section>
+
+<div class="foot">
+  GEOTECH HR Portal — technical and HR audit · 2 September 2026<br>
+  Method: nine parallel deep-readers over every slice of the codebase, seven independent expert lenses, and first-hand verification in source of every finding reported above. Refuted claims were dropped. No application file was modified.
+</div>
+
+</div>

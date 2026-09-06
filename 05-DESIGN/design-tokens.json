@@ -1,0 +1,310 @@
+{
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "_meta": {
+    "source": "src/styles/theme.css and src/app/App.tsx",
+    "generated": "2026-09-03",
+    "note": "Two palettes. 'implemented' is what the app renders today; 'geotech' is the official brand identity from the logo artwork. The audit flagged that they disagree — pick one before design work starts."
+  },
+  "color": {
+    "implemented": {
+      "accent": {
+        "$value": "#EDF2FB",
+        "$type": "color"
+      },
+      "accent-foreground": {
+        "$value": "#1D4E89",
+        "$type": "color"
+      },
+      "background": {
+        "$value": "#F5F7FA",
+        "$type": "color"
+      },
+      "border": {
+        "$value": "#E2E8F0",
+        "$type": "color"
+      },
+      "card": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "card-foreground": {
+        "$value": "#14181F",
+        "$type": "color"
+      },
+      "destructive": {
+        "$value": "#B91C1C",
+        "$type": "color"
+      },
+      "destructive-foreground": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "foreground": {
+        "$value": "#14181F",
+        "$type": "color"
+      },
+      "input-background": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "muted": {
+        "$value": "#F1F4F8",
+        "$type": "color"
+      },
+      "muted-foreground": {
+        "$value": "#64748B",
+        "$type": "color"
+      },
+      "popover": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "popover-foreground": {
+        "$value": "#14181F",
+        "$type": "color"
+      },
+      "primary": {
+        "$value": "#1D4E89",
+        "$type": "color"
+      },
+      "primary-foreground": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "ring": {
+        "$value": "#1D4E89",
+        "$type": "color"
+      },
+      "secondary": {
+        "$value": "#F1F4F8",
+        "$type": "color"
+      },
+      "secondary-foreground": {
+        "$value": "#14181F",
+        "$type": "color"
+      },
+      "sidebar": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "sidebar-accent": {
+        "$value": "#EDF2FB",
+        "$type": "color"
+      },
+      "sidebar-accent-foreground": {
+        "$value": "#1D4E89",
+        "$type": "color"
+      },
+      "sidebar-border": {
+        "$value": "#E2E8F0",
+        "$type": "color"
+      },
+      "sidebar-foreground": {
+        "$value": "#14181F",
+        "$type": "color"
+      },
+      "sidebar-primary": {
+        "$value": "#1D4E89",
+        "$type": "color"
+      },
+      "sidebar-primary-foreground": {
+        "$value": "#FFFFFF",
+        "$type": "color"
+      },
+      "sidebar-ring": {
+        "$value": "#1D4E89",
+        "$type": "color"
+      },
+      "switch-background": {
+        "$value": "#CBD5E1",
+        "$type": "color"
+      }
+    },
+    "geotech": {
+      "gold": {
+        "$value": "#A0840D",
+        "$type": "color"
+      },
+      "gold-dark": {
+        "$value": "#6D5B07",
+        "$type": "color"
+      },
+      "graphite": {
+        "$value": "#626366",
+        "$type": "color"
+      },
+      "charcoal": {
+        "$value": "#231F20",
+        "$type": "color"
+      },
+      "silver": {
+        "$value": "#929497",
+        "$type": "color"
+      }
+    },
+    "status": {
+      "pending": {
+        "$value": "#B45309",
+        "$type": "color"
+      },
+      "pending-bg": {
+        "$value": "#FEF3C7",
+        "$type": "color"
+      },
+      "approved": {
+        "$value": "#15803D",
+        "$type": "color"
+      },
+      "approved-bg": {
+        "$value": "#DCFCE7",
+        "$type": "color"
+      },
+      "rejected": {
+        "$value": "#B91C1C",
+        "$type": "color"
+      },
+      "rejected-bg": {
+        "$value": "#FEE2E2",
+        "$type": "color"
+      }
+    }
+  },
+  "typography": {
+    "fontFamily": {
+      "implemented": {
+        "$value": "Inter",
+        "$type": "fontFamily"
+      },
+      "brand": {
+        "$value": "Graphik",
+        "$type": "fontFamily"
+      },
+      "brandArabic": {
+        "$value": "Neo Sans Arabic",
+        "$type": "fontFamily"
+      }
+    },
+    "scale": {
+      "display-2xl": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "24px",
+          "fontWeight": 600,
+          "lineHeight": "32px"
+        }
+      },
+      "heading-xl": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "20px",
+          "fontWeight": 600,
+          "lineHeight": "28px"
+        }
+      },
+      "heading-lg": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "18px",
+          "fontWeight": 600,
+          "lineHeight": "26px"
+        }
+      },
+      "body-base": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "16px",
+          "fontWeight": 400,
+          "lineHeight": "24px"
+        }
+      },
+      "body-sm": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "14px",
+          "fontWeight": 400,
+          "lineHeight": "20px"
+        }
+      },
+      "label-sm": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "14px",
+          "fontWeight": 500,
+          "lineHeight": "20px"
+        }
+      },
+      "caption-xs": {
+        "$type": "typography",
+        "$value": {
+          "fontSize": "12px",
+          "fontWeight": 400,
+          "lineHeight": "16px"
+        }
+      }
+    }
+  },
+  "radius": {
+    "sm": {
+      "$value": "4px",
+      "$type": "dimension"
+    },
+    "md": {
+      "$value": "6px",
+      "$type": "dimension"
+    },
+    "lg": {
+      "$value": "8px",
+      "$type": "dimension"
+    },
+    "xl": {
+      "$value": "12px",
+      "$type": "dimension"
+    },
+    "full": {
+      "$value": "999px",
+      "$type": "dimension"
+    }
+  },
+  "spacing": {
+    "1": {
+      "$value": "4px",
+      "$type": "dimension"
+    },
+    "2": {
+      "$value": "8px",
+      "$type": "dimension"
+    },
+    "3": {
+      "$value": "12px",
+      "$type": "dimension"
+    },
+    "4": {
+      "$value": "16px",
+      "$type": "dimension"
+    },
+    "5": {
+      "$value": "20px",
+      "$type": "dimension"
+    },
+    "6": {
+      "$value": "24px",
+      "$type": "dimension"
+    },
+    "8": {
+      "$value": "32px",
+      "$type": "dimension"
+    },
+    "10": {
+      "$value": "40px",
+      "$type": "dimension"
+    },
+    "12": {
+      "$value": "48px",
+      "$type": "dimension"
+    },
+    "16": {
+      "$value": "64px",
+      "$type": "dimension"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "GEOTECH HR — Design System Builder",
+  "id": "geotech-hr-design-system",
+  "api": "1.0.0",
+  "main": "code.js",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}
