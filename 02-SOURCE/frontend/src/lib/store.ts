@@ -100,7 +100,14 @@ export interface EmployeeProfile {
   firstName: string;
   lastName: string;
   position: string;
+  /** Display name — resolved from departments.name for a real employee, the plain demo string otherwise. */
   department: string;
+  /**
+   * The real departments.id, present only for a Supabase-backed employee —
+   * absent (undefined) for a local demo employee, which has no such row.
+   * HR-only to set; see App.tsx's profiles_protect_self_edit_fields note.
+   */
+  departmentId?: string;
   email: string;
   phone?: string;
   status: "ACTIVE" | "INACTIVE";
@@ -114,6 +121,18 @@ export interface EmployeeProfile {
 
 export function empName(e: EmployeeProfile): string {
   return e.name;
+}
+
+/**
+ * A real, Supabase-backed department (supabase/migrations/20260906160000).
+ * Local demo employees keep using the plain DEPARTMENTS string list below —
+ * they have no row here at all, by design (see the Phase 6A Extension
+ * report: no destructive migration of the demo roster).
+ */
+export interface DepartmentRecord {
+  id: string;
+  name: string;
+  status: "ACTIVE" | "INACTIVE";
 }
 
 export const DEPARTMENTS = [
@@ -655,7 +674,10 @@ export function validateEmployeeFields(
     lastName?: string;
     email?: string;
     position?: string;
+    /** Local demo employee edits only — see EmployeeForm's isRealDepartments split. */
     department?: string;
+    /** A real departments.id — every other path (create; editing a real employee). */
+    departmentId?: string;
     role?: string;
     managerId?: string | null;
     status?: string;
@@ -693,7 +715,7 @@ export function validateEmployeeFields(
     if (dup) errors.email = "This email is already in use.";
   }
   if (!data.position?.trim()) errors.position = "Position is required.";
-  if (!data.department?.trim()) errors.department = "Department is required.";
+  if (!data.department?.trim() && !data.departmentId?.trim()) errors.department = "Department is required.";
   if (!data.role) errors.role = "Role is required.";
 
   if (data.role === "EMPLOYEE" && !data.managerId) {

@@ -19,11 +19,11 @@
 // handed straight to admin.createUser(), which is Supabase Auth's own
 // bcrypt-hashed storage, never this codebase's.
 //
-// This file has not been deployed or executed in this session — no Docker
-// is available to run `supabase functions serve` locally, and Phase 5
-// explicitly does not apply anything to the remote project. It is written
-// to the documented Supabase Edge Function contract (Deno.serve, npm:
-// specifiers) and reviewed by hand; it has not been run.
+// Deployed via `supabase functions deploy --use-api` (Backend Activation
+// session) — live at /functions/v1/provision-employee on the linked
+// project. SUPABASE_URL/SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY are
+// auto-provisioned by the platform for every Edge Function; no manual
+// secret configuration was needed.
 
 import { createClient } from 'npm:@supabase/supabase-js@2.113.0'
 
@@ -53,7 +53,7 @@ interface ProvisionRequestBody {
   first_name?: string
   last_name?: string
   position?: string
-  department?: string
+  department_id?: string
   email?: string
   phone?: string
   manager_id?: string | null
@@ -135,6 +135,11 @@ Deno.serve(async (req: Request) => {
     return jsonError('A valid email is required.', 400)
   }
 
+  const departmentId = String(body.department_id ?? '').trim()
+  if (!departmentId) {
+    return jsonError('Department is required.', 400)
+  }
+
   // Deterministic synthetic Auth alias — must match employeeCodeToSyntheticEmail
   // in 02-SOURCE/frontend/src/lib/auth.ts exactly, or sign-in will never find
   // this account (§6.2).
@@ -163,7 +168,7 @@ Deno.serve(async (req: Request) => {
     first_name: body.first_name,
     last_name: body.last_name,
     position: body.position,
-    department: body.department,
+    department_id: departmentId,
     email,
     phone: body.phone,
     manager_id: body.manager_id ?? null,

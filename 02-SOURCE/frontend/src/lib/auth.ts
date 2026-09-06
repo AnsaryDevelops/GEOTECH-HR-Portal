@@ -522,7 +522,8 @@ export interface ProvisionEmployeeInput {
   firstName: string
   lastName: string
   position: string
-  department: string
+  /** A real, ACTIVE departments.id — Phase 6A Extension replaced free-text department with this. */
+  departmentId: string
   email: string
   phone?: string
   managerId?: string | null
@@ -537,13 +538,8 @@ export type ProvisionEmployeeResult =
 
 /**
  * Calls the provision-employee Edge Function — the only path that creates a
- * real Auth user and its matching profiles row. This function is
- * intentionally not yet wired into the Add Employee form's default submit
- * handler: doing so is Phase 6 (full frontend data migration) work, since a
- * Supabase-provisioned employee will not appear anywhere in this app's
- * current localStorage-backed views until that migration happens. It is
- * implemented and exported now so Phase 6 has nothing left to build at the
- * auth-boundary layer — only the UI wiring.
+ * real Auth user and its matching profiles row. Wired into the Add Employee
+ * form's submit handler since Phase 6A (HREmployeesPage.createEmployee).
  *
  * No plaintext password is stored anywhere by this function or by the Edge
  * Function it calls — the password is transmitted once, over this
@@ -573,7 +569,7 @@ export async function provisionEmployeeAccount(
         first_name: input.firstName,
         last_name: input.lastName,
         position: input.position,
-        department: input.department,
+        department_id: input.departmentId,
         email: input.email,
         phone: input.phone,
         manager_id: input.managerId ?? null,

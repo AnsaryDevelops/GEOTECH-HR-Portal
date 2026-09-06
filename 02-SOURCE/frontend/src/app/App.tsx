@@ -71,6 +71,7 @@ import type {
   EmployeeProfile,
   LeaveTypeRecord,
   UserRole,
+  DepartmentRecord,
 } from "../lib/store";
 import {
   signIn as authSignIn,
@@ -81,8 +82,9 @@ import {
   createHRUserCredential,
   updateHRUserCredential,
   subscribeToAuthChanges,
+  provisionEmployeeAccount,
 } from "../lib/auth";
-import { isSupabaseConfigured } from "../lib/supabase";
+import { supabase, isSupabaseConfigured } from "../lib/supabase";
 import companyLogoSrc from "../imports/GEO_Egypt_LOGO-01.png";
 import type { Session } from "../lib/auth";
 import { clsx, type ClassValue } from "clsx";
@@ -1275,6 +1277,7 @@ const NAV_ITEMS: Record<
     { label: "Dashboard", icon: Home, id: "dashboard" },
     { label: "My Requests", icon: FileText, id: "requests" },
     { label: "Notifications", icon: Bell, id: "notifications" },
+    { label: "My Profile", icon: User, id: "profile" },
   ],
   MANAGER: [
     { label: "Dashboard", icon: Home, id: "dashboard" },
@@ -1282,6 +1285,7 @@ const NAV_ITEMS: Record<
     { label: "My Requests", icon: Umbrella, id: "myrequests" },
     { label: "Requests", icon: FileText, id: "requests" },
     { label: "Notifications", icon: Bell, id: "notifications" },
+    { label: "My Profile", icon: User, id: "profile" },
   ],
   TECH_MANAGER: [
     { label: "Dashboard", icon: Home, id: "dashboard" },
@@ -1290,6 +1294,7 @@ const NAV_ITEMS: Record<
     { label: "Requests", icon: FileText, id: "requests" },
     { label: "Organization", icon: Briefcase, id: "organization" },
     { label: "Notifications", icon: Bell, id: "notifications" },
+    { label: "My Profile", icon: User, id: "profile" },
   ],
   GM: [
     { label: "Dashboard", icon: Home, id: "dashboard" },
@@ -1298,6 +1303,7 @@ const NAV_ITEMS: Record<
     { label: "Requests", icon: FileText, id: "requests" },
     { label: "Organization", icon: Briefcase, id: "organization" },
     { label: "Notifications", icon: Bell, id: "notifications" },
+    { label: "My Profile", icon: User, id: "profile" },
   ],
   HR: [
     { label: "Dashboard", icon: Home, id: "dashboard" },
@@ -1307,6 +1313,7 @@ const NAV_ITEMS: Record<
     { label: "Attendance", icon: Clock, id: "attendance" },
     { label: "Notifications", icon: Bell, id: "notifications" },
     { label: "Settings", icon: Settings, id: "settings" },
+    { label: "My Profile", icon: User, id: "profile" },
   ],
 };
 
@@ -1620,7 +1627,8 @@ interface CreateEmployeeInput {
   /** Manually entered by HR; becomes the employee's id and login identifier — see createEmployee. */
   employeeCode: string;
   firstName: string; lastName: string; email: string; phone?: string;
-  position: string; department: string; role: UserRole;
+  /** A real, ACTIVE departments.id — creation is always a real Supabase employee (Phase 6A). */
+  position: string; departmentId: string; role: UserRole;
   managerId: string | null; status: "ACTIVE" | "INACTIVE"; password: string;
   annualDays: number; casualDays: number; permissionMinutes: number;
   /** Only applied when role is MANAGER — see createEmployee. */
@@ -1634,6 +1642,8 @@ interface StoreContextValue {
   leaveTypes: LeaveTypeRecord[];
   attendance: AttendanceRecord[];
   holidays: HolidayRecord[];
+  /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. */
+  departments: DepartmentRecord[];
   createLeaveRequest: (
     employeeId: string, employeeName: string,
     data: { leaveType: string; startDate: string; endDate: string; reason?: string }
@@ -1649,13 +1659,22 @@ interface StoreContextValue {
   deleteRequest: (requestId: string, employeeId: string) => { ok: boolean; error?: string };
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: (userId: string) => void;
-  // HR-only operations
+  // HR-only operations. EMPLOYEE/MANAGER creation goes through the real
+  // Supabase provisioning path (provisionEmployeeAccount / Edge Function) —
+  // see StoreProvider.createEmployee — so both are async now; every other
+  // signature here is unchanged from before Phase 6A.
   createEmployee: (
     data: CreateEmployeeInput
-  ) => { ok: true; employee: EmployeeProfile; password: string } | { ok: false; errors: Record<string, string> };
-  updateEmployee: (id: string, data: Partial<EmployeeProfile>) => { ok: boolean; error?: string };
+  ) => Promise<{ ok: true; employee: EmployeeProfile; password: string } | { ok: false; errors: Record<string, string> }>;
+  updateEmployee: (id: string, data: Partial<EmployeeProfile>) => Promise<{ ok: boolean; error?: string }>;
+  /** True once `id` is known to be a real Supabase-backed profile, not a local demo employee. */
+  isRemoteEmployee: (id: string) => boolean;
   createLeaveType: (name: string, balanceKey: BalanceKey | null) => LeaveTypeRecord;
   updateLeaveType: (id: string, updates: Partial<LeaveTypeRecord>) => void;
+  /** HR-only; RLS (departments_insert_hr) re-enforces this server-side. */
+  createDepartment: (name: string) => Promise<{ ok: boolean; error?: string }>;
+  /** HR-only; covers rename and archive/reactivate. RLS (departments_update_hr) re-enforces server-side. */
+  updateDepartment: (id: string, updates: { name?: string; status?: "ACTIVE" | "INACTIVE" }) => Promise<{ ok: boolean; error?: string }>;
   createPermissionRequest: (
     employeeId: string, employeeName: string,
     data: { permissionKind: PermissionKind; date: string; minutes: number; reason?: string }
@@ -1669,10 +1688,133 @@ interface StoreContextValue {
   deleteHoliday: (id: string) => void;
 }
 
+// Phase 6A — profiles only. Maps one `profiles` row (Supabase) onto the
+// existing EmployeeProfile shape so every page that already reads
+// useStore().employees keeps working unchanged. `entitlements` has no
+// backing column yet — leave_allocations is a later Phase 6 stage — so real
+// employees show 0/0 here rather than a fabricated number; this is the one
+// known, deliberate gap, not a bug.
+function mapProfileRowToEmployeeProfile(row: {
+  id: string;
+  employee_code: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  name: string;
+  position: string | null;
+  department: string | null;
+  department_id: string | null;
+  departments: { name: string } | { name: string }[] | null;
+  email: string | null;
+  phone: string | null;
+  status: "ACTIVE" | "INACTIVE";
+  role: UserRole;
+  manager_id: string | null;
+  permission_minutes_per_month: number;
+}): EmployeeProfile {
+  // PostgREST embeds a to-one FK relationship as a single object normally,
+  // but the generic client type used here allows either shape — handle both
+  // rather than assuming.
+  const departmentRow = Array.isArray(row.departments) ? row.departments[0] : row.departments;
+  return {
+    id: row.id,
+    employeeCode: row.employee_code ?? undefined,
+    name: row.name,
+    firstName: row.first_name ?? "",
+    lastName: row.last_name ?? "",
+    position: row.position ?? "",
+    department: departmentRow?.name ?? row.department ?? "",
+    departmentId: row.department_id ?? undefined,
+    email: row.email ?? "",
+    phone: row.phone ?? undefined,
+    status: row.status,
+    managerId: row.manager_id,
+    role: row.role,
+    entitlements: { ANNUAL: 0, CASUAL: 0 },
+    permissionMinutesPerMonth: row.permission_minutes_per_month,
+  };
+}
+
+const PROFILE_SELECT_COLUMNS =
+  "id, employee_code, first_name, last_name, name, position, department, department_id, departments(name), email, phone, status, role, manager_id, permission_minutes_per_month";
+
 const StoreCtx = createContext<StoreContextValue | null>(null);
 
 function StoreProvider({ children }: { children?: React.ReactNode }) {
   const [store, setStore] = useState<StoreData>(() => loadStore());
+  const { session } = useAuth();
+
+  // Profiles/employees only (Phase 6A) — every other domain (requests,
+  // notifications, leave types, attendance, holidays) still lives entirely
+  // in `store` above and is untouched. Real (Supabase) employees are kept in
+  // a separate array and merged with the local demo roster below, rather
+  // than replacing it: existing local demo requests/notifications/attendance
+  // reference the local demo employee ids by id, and nothing about those
+  // records is being migrated in this phase, so the local roster those
+  // records depend on must keep existing exactly as it did before.
+  const [remoteEmployees, setRemoteEmployees] = useState<EmployeeProfile[]>([]);
+
+  const fetchRemoteEmployees = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setRemoteEmployees([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase.from("profiles").select(PROFILE_SELECT_COLUMNS);
+      if (error || !data) {
+        setRemoteEmployees([]);
+        return;
+      }
+      setRemoteEmployees(data.map(mapProfileRowToEmployeeProfile));
+    } catch {
+      setRemoteEmployees([]);
+    }
+  }, []);
+
+  // Real, Supabase-backed departments (supabase/migrations/20260906160000) —
+  // HR-managed company data, kept separate from the local demo DEPARTMENTS
+  // string list exactly like remoteEmployees is kept separate from the local
+  // demo roster: no destructive migration, no shared shape.
+  const [departments, setDepartments] = useState<DepartmentRecord[]>([]);
+
+  const fetchDepartments = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setDepartments([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase.from("departments").select("id, name, status").order("name");
+      if (error || !data) {
+        setDepartments([]);
+        return;
+      }
+      setDepartments(data as DepartmentRecord[]);
+    } catch {
+      setDepartments([]);
+    }
+  }, []);
+
+  // Re-fetch whenever the signed-in session changes (login/logout/switching
+  // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
+  // session is actually allowed to see (self/reports/own-manager for a
+  // regular employee, everything for HR/TM/GM); a local demo session simply
+  // gets an empty result back (no Supabase session token to attach, so the
+  // request runs as `anon`, which has zero grants on `profiles`), which
+  // fetchRemoteEmployees already treats as "no remote employees" — never a
+  // crash. Departments RLS (departments_select_active) similarly returns only
+  // ACTIVE rows to a non-HR session, all rows to HR.
+  useEffect(() => {
+    fetchRemoteEmployees();
+    fetchDepartments();
+  }, [session, fetchRemoteEmployees, fetchDepartments]);
+
+  // The one list every page already reads via useStore().employees — local
+  // demo roster first, then real Supabase employees. No id collision is
+  // possible (EMP-NNNNN-shaped strings vs. real UUIDs).
+  const employees = [...store.employees, ...remoteEmployees];
+
+  function isRemoteEmployee(id: string): boolean {
+    return remoteEmployees.some((e) => e.id === id);
+  }
 
   // Persist as an effect rather than inside the updater. Writing to storage from
   // within a state updater is a side effect in a reducer, which React 18
@@ -2073,58 +2215,93 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }));
   }
 
-  function createEmployee(data: CreateEmployeeInput) {
-    const errs = validateEmployeeFields(data, store.employees);
+  // Phase 6A: EMPLOYEE/MANAGER creation goes through the real Edge Function
+  // (provisionEmployeeAccount), never the local store — creation is now 100%
+  // Supabase. TECH_MANAGER/GM/HR creation is explicitly out of scope (no RPC
+  // exists for it yet; see the Phase 6 audit) and is declined with a clear
+  // message rather than left to fail confusingly against the server.
+  async function createEmployee(data: CreateEmployeeInput) {
+    if (data.role !== "EMPLOYEE" && data.role !== "MANAGER") {
+      return {
+        ok: false as const,
+        errors: { role: "Creating this role isn't available yet — only Employee and Direct Manager accounts can be created here." },
+      };
+    }
+
+    const errs = validateEmployeeFields(data, employees);
     if (Object.keys(errs).length > 0) return { ok: false as const, errors: errs };
 
-    // The Employee Code HR enters is the one identifier — it is the id, not a
-    // second field pointing at the same person (see validateEmployeeFields'
-    // uniqueness check, which already treats both spaces as one). Canonical
-    // form is uppercase, matching signIn()'s own normalization — storing it
-    // verbatim would let a lowercase/mixed-case code fail to log in.
-    const id = data.employeeCode.trim().toUpperCase();
-    const name = `${data.firstName.trim()} ${data.lastName.trim()}`;
+    // A locally-seeded demo manager has no matching row in Supabase at all,
+    // so it can never be a real employee's manager_id — reject clearly
+    // rather than letting the server-side uuid cast fail unreadably.
+    if (data.managerId && !isRemoteEmployee(data.managerId)) {
+      return {
+        ok: false as const,
+        errors: { managerId: "Selected manager is a demo account and cannot be assigned to a real employee yet." },
+      };
+    }
+    // Same reasoning for team members offered to a newly created manager —
+    // only real candidates are ever sent to the RPC.
+    const teamMemberIds = (data.teamMemberIds ?? []).filter((memberId) => isRemoteEmployee(memberId));
+
+    const result = await provisionEmployeeAccount({
+      role: data.role,
+      employeeCode: data.employeeCode,
+      password: data.password,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      position: data.position,
+      departmentId: data.departmentId,
+      email: data.email,
+      phone: data.phone,
+      managerId: data.managerId || null,
+      permissionMinutesPerMonth: data.permissionMinutes,
+      teamMemberIds,
+    });
+
+    if (!result.ok) {
+      return { ok: false as const, errors: { _form: result.error } };
+    }
+
+    // The server is authoritative for id/employee_code (canonicalized
+    // uppercase)/role/name; every other field is exactly what HR just typed
+    // and the server already accepted.
     const employee: EmployeeProfile = {
-      id, employeeCode: id, name, firstName: data.firstName.trim(), lastName: data.lastName.trim(),
-      position: data.position.trim(), department: data.department,
+      id: result.profile.id,
+      employeeCode: result.profile.employee_code,
+      name: result.profile.name,
+      firstName: data.firstName.trim(),
+      lastName: data.lastName.trim(),
+      position: data.position.trim(),
+      department: departments.find((d) => d.id === data.departmentId)?.name ?? "",
+      departmentId: data.departmentId,
       email: data.email.trim().toLowerCase(),
       phone: data.phone?.trim() || undefined,
-      status: data.status, managerId: data.managerId || null, role: data.role,
+      status: "ACTIVE",
+      managerId: data.managerId || null,
+      role: result.profile.role,
       entitlements: { ANNUAL: data.annualDays, CASUAL: data.casualDays },
       permissionMinutesPerMonth: data.permissionMinutes,
     };
-    createHRUserCredential({ employeeNumber: id, name, role: data.role, password: data.password });
 
-    // Team assignment only ever applies to a newly created Direct Manager, and
-    // only to employees who are still unmanaged at the moment of creation —
-    // this never silently reassigns someone who already reports to another
-    // manager, and never trusts the client-selected list without re-checking
-    // it against the current data here. Both the new employee and every team
-    // reassignment land in this one mutate() call, so there is no state where
-    // the manager exists but the team does not, or the reverse.
-    const teamIds = new Set(data.role === "MANAGER" ? data.teamMemberIds ?? [] : []);
+    // Re-fetch rather than hand-patch the local cache: creating a manager
+    // with a team reassigns those team members' manager_id server-side
+    // (hr_create_manager_with_team), and a plain re-fetch is the simplest
+    // way to guarantee the local view reflects that immediately rather than
+    // only after the next unrelated refresh.
+    await fetchRemoteEmployees();
 
-    mutate((p) => ({
-      ...p,
-      employees: [
-        ...p.employees.map((e) =>
-          teamIds.has(e.id) && e.role === "EMPLOYEE" && e.status === "ACTIVE" && !e.managerId
-            ? { ...e, managerId: id }
-            : e
-        ),
-        employee,
-      ],
-      nextEmpSeq: p.nextEmpSeq + 1,
-    }));
     return { ok: true as const, employee, password: data.password };
   }
 
-  function updateEmployee(id: string, data: Partial<EmployeeProfile>): { ok: boolean; error?: string } {
-    const target = store.employees.find((e) => e.id === id);
+  async function updateEmployee(id: string, data: Partial<EmployeeProfile>): Promise<{ ok: boolean; error?: string }> {
+    const target = employees.find((e) => e.id === id);
     if (!target) return { ok: false, error: "Employee not found." };
 
-    // Guard the quick Activate/Deactivate action too, not just the edit form.
-    const reports = store.employees.filter((e) => e.managerId === id);
+    // Guard the quick Activate/Deactivate action too, not just the edit form
+    // — applies the same way to local demo and real employees, since this
+    // rule has always been enforced client-side only, on either path.
+    const reports = employees.filter((e) => e.managerId === id);
     if (data.status === "INACTIVE" && target.role === "MANAGER" && reports.length > 0) {
       return {
         ok: false,
@@ -2132,8 +2309,51 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       };
     }
 
+    if (isRemoteEmployee(id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+
+      // set_approval_routing (a later phase) is the only safe way to
+      // promote someone to Technical Manager/General Manager — a raw
+      // profiles UPDATE bypasses its ordering guarantees against the
+      // partial-unique-index/company_approval_routing invariants.
+      if ((data.role === "TECH_MANAGER" || data.role === "GM") && target.role !== data.role) {
+        return {
+          ok: false,
+          error: "Promoting to Technical Manager or General Manager isn't available yet — this requires Approval Routing, a later phase.",
+        };
+      }
+      if (data.managerId && !isRemoteEmployee(data.managerId)) {
+        return { ok: false, error: "Selected manager is a demo account and cannot be assigned to a real employee yet." };
+      }
+
+      const patch: Record<string, unknown> = {};
+      if (data.firstName !== undefined) patch.first_name = data.firstName;
+      if (data.lastName !== undefined) patch.last_name = data.lastName;
+      if (data.firstName !== undefined || data.lastName !== undefined) {
+        patch.name = `${data.firstName ?? target.firstName} ${data.lastName ?? target.lastName}`;
+      }
+      if (data.position !== undefined) patch.position = data.position;
+      if (data.department !== undefined) patch.department = data.department;
+      if (data.email !== undefined) patch.email = data.email;
+      if (data.phone !== undefined) patch.phone = data.phone ?? null;
+      if (data.status !== undefined) patch.status = data.status;
+      if (data.role !== undefined) patch.role = data.role;
+      if (data.managerId !== undefined) patch.manager_id = data.managerId;
+      if (data.permissionMinutesPerMonth !== undefined) patch.permission_minutes_per_month = data.permissionMinutesPerMonth;
+      if (data.departmentId !== undefined) patch.department_id = data.departmentId || null;
+      // entitlements has no backing column (leave_allocations is a later
+      // Phase 6 stage) — deliberately never sent.
+
+      const { error } = await supabase.from("profiles").update(patch).eq("id", id);
+      if (error) return { ok: false, error: error.message };
+
+      await fetchRemoteEmployees();
+      return { ok: true };
+    }
+
+    // Unchanged local path for demo employees.
     mutate((p) => {
-      const employees = p.employees.map((e) => {
+      const nextEmployees = p.employees.map((e) => {
         if (e.id !== id) return e;
         const updated = { ...e, ...data };
         if (data.firstName || data.lastName) {
@@ -2141,7 +2361,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
         }
         return updated;
       });
-      return { ...p, employees };
+      return { ...p, employees: nextEmployees };
     });
 
     // Role, name and status are re-read from the employee record on every
@@ -2165,15 +2385,54 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     mutate((p) => ({ ...p, leaveTypes: p.leaveTypes.map((lt) => lt.id === id ? { ...lt, ...updates } : lt) }));
   }
 
+  // HR-only (departments_insert_hr RLS policy re-checks this server-side too
+  // — the frontend is never the security boundary). The partial unique index
+  // on (name) WHERE status = 'ACTIVE' is the real duplicate-name guard; this
+  // client-side check only gives a faster, friendlier error.
+  async function createDepartment(name: string): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    const trimmed = name.trim();
+    if (!trimmed) return { ok: false, error: "Name is required." };
+    if (departments.some((d) => d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
+      return { ok: false, error: "An active department with this name already exists." };
+    }
+    const { error } = await supabase.from("departments").insert({ name: trimmed });
+    if (error) return { ok: false, error: error.message };
+    await fetchDepartments();
+    return { ok: true };
+  }
+
+  // Covers both rename (name) and archive/reactivate (status) — HR-only,
+  // departments_update_hr RLS policy re-checks server-side.
+  async function updateDepartment(id: string, updates: { name?: string; status?: "ACTIVE" | "INACTIVE" }): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    if (updates.name !== undefined) {
+      const trimmed = updates.name.trim();
+      if (!trimmed) return { ok: false, error: "Name is required." };
+      if (departments.some((d) => d.id !== id && d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
+        return { ok: false, error: "An active department with this name already exists." };
+      }
+    }
+    const patch: Record<string, unknown> = {};
+    if (updates.name !== undefined) patch.name = updates.name.trim();
+    if (updates.status !== undefined) patch.status = updates.status;
+    const { error } = await supabase.from("departments").update(patch).eq("id", id);
+    if (error) return { ok: false, error: error.message };
+    await fetchDepartments();
+    return { ok: true };
+  }
+
   return (
     <StoreCtx.Provider value={{
       requests: store.requests, notifications: store.notifications,
-      employees: store.employees, leaveTypes: store.leaveTypes,
+      employees, leaveTypes: store.leaveTypes,
       attendance: store.attendance, holidays: store.holidays,
+      departments,
       createLeaveRequest, createMissionRequest, createPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
       approveRequest, rejectRequest, deleteRequest, markNotificationRead, markAllNotificationsRead,
-      createEmployee, updateEmployee, createLeaveType, updateLeaveType,
+      createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
+      createDepartment, updateDepartment,
     }}>
       {children}
     </StoreCtx.Provider>
@@ -2249,6 +2508,7 @@ const NAV_ROUTES: Record<UserRole, Record<string, string>> = {
     dashboard: "/employee/dashboard",
     requests: "/employee/requests",
     notifications: "/employee/notifications",
+    profile: "/profile",
   },
   MANAGER: {
     dashboard: "/manager/dashboard",
@@ -2256,6 +2516,7 @@ const NAV_ROUTES: Record<UserRole, Record<string, string>> = {
     myrequests: "/employee/requests",
     requests: "/manager/requests",
     notifications: "/manager/notifications",
+    profile: "/profile",
   },
   TECH_MANAGER: {
     dashboard: "/manager/dashboard",
@@ -2264,6 +2525,7 @@ const NAV_ROUTES: Record<UserRole, Record<string, string>> = {
     requests: "/manager/requests",
     organization: "/manager/organization",
     notifications: "/manager/notifications",
+    profile: "/profile",
   },
   GM: {
     dashboard: "/manager/dashboard",
@@ -2272,6 +2534,7 @@ const NAV_ROUTES: Record<UserRole, Record<string, string>> = {
     requests: "/manager/requests",
     organization: "/manager/organization",
     notifications: "/manager/notifications",
+    profile: "/profile",
   },
   HR: {
     dashboard: "/hr/dashboard",
@@ -2281,6 +2544,7 @@ const NAV_ROUTES: Record<UserRole, Record<string, string>> = {
     attendance: "/hr/attendance",
     notifications: "/hr/notifications",
     settings: "/hr/settings",
+    profile: "/profile",
   },
 };
 
@@ -4018,7 +4282,7 @@ function EmployeeDetailView({
   managerName: string;
 }) {
   const rows: { label: string; value: string }[] = [
-    { label: "Employee ID", value: employee.id },
+    { label: "Employee ID", value: employee.employeeCode ?? employee.id },
     { label: "Position", value: employee.position },
     { label: "Department", value: employee.department },
     { label: "Email", value: employee.email },
@@ -4116,7 +4380,8 @@ function ManagerTeamPage() {
     ? team.filter(
         (e) =>
           e.name.toLowerCase().includes(q) ||
-          e.id.toLowerCase().includes(q)
+          e.id.toLowerCase().includes(q) ||
+          (e.employeeCode?.toLowerCase().includes(q) ?? false)
       )
     : team;
 
@@ -4191,7 +4456,7 @@ function ManagerTeamPage() {
                   key: "id",
                   header: "Employee ID",
                   render: (e) => (
-                    <span className="text-sm text-muted-foreground font-mono">{e.id}</span>
+                    <span className="text-sm text-muted-foreground font-mono">{e.employeeCode ?? e.id}</span>
                   ),
                 },
                 {
@@ -4392,7 +4657,7 @@ function OrganizationPage() {
                         <span className="font-medium text-foreground">{e.name}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{e.id}</td>
+                    <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{e.employeeCode ?? e.id}</td>
                     <td className="px-4 py-3 text-muted-foreground">{e.position}</td>
                     <td className="px-4 py-3 text-muted-foreground">{e.department}</td>
                     <td className="px-4 py-3 text-muted-foreground">{managerName(e)}</td>
@@ -5046,7 +5311,11 @@ interface EmployeeFormData {
   /** Add-only: manually entered by HR, becomes the new employee's login identifier. */
   employeeCode: string;
   firstName: string; lastName: string; email: string; phone: string;
-  position: string; department: string; role: UserRole;
+  position: string; role: UserRole;
+  /** Local demo employee edits only (EmployeeForm's isRealDepartments = false). */
+  department: string;
+  /** Real department, id-based: Add (always) and editing a real employee. */
+  departmentId: string;
   managerId: string; status: "ACTIVE" | "INACTIVE"; password: string;
   annualDays: string;
   casualDays: string;
@@ -5138,7 +5407,7 @@ function TeamMembersField({
                 />
                 <span className="flex-1 min-w-0 truncate">
                   <span className="font-medium text-foreground">{e.name}</span>
-                  <span className="text-muted-foreground"> · {e.id} · {e.department}</span>
+                  <span className="text-muted-foreground"> · {e.employeeCode ?? e.id} · {e.department}</span>
                 </span>
                 {alreadyManaged && (
                   <span className="text-xs text-muted-foreground flex-shrink-0">
@@ -5158,16 +5427,21 @@ function EmployeeForm({
   initial,
   managers,
   allEmployees,
+  departments,
   errors,
   onChange,
   isEdit,
+  useRealDepartments,
 }: {
   initial: EmployeeFormData;
   managers: EmployeeProfile[];
   allEmployees: EmployeeProfile[];
+  departments: DepartmentRecord[];
   errors: Record<string, string>;
   onChange: (next: EmployeeFormData) => void;
   isEdit: boolean;
+  /** True for Add (always real) and for editing an existing real employee; false only when editing a local demo employee. */
+  useRealDepartments: boolean;
 }) {
   function field<K extends keyof EmployeeFormData>(key: K) {
     return (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
@@ -5183,10 +5457,28 @@ function EmployeeForm({
       <Input label="Email *" type="email" value={initial.email} onChange={field("email")} error={errors.email} placeholder="email@company.com" />
       <Input label="Phone" value={initial.phone} onChange={field("phone")} placeholder="+20 10 0000 0000" />
       <Input label="Position *" value={initial.position} onChange={field("position")} error={errors.position} placeholder="e.g. Frontend Developer" />
-      <Select label="Department *" value={initial.department} onChange={field("department")} error={errors.department}>
-        <option value="">Select Department</option>
-        {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
-      </Select>
+      {useRealDepartments ? (
+        <Select
+          label="Department *"
+          value={initial.departmentId}
+          onChange={(e) => onChange({ ...initial, departmentId: e.target.value })}
+          error={errors.department}
+        >
+          <option value="">Select Department</option>
+          {departments
+            .filter((d) => d.status === "ACTIVE" || d.id === initial.departmentId)
+            .map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}{d.status === "INACTIVE" ? " (archived)" : ""}
+              </option>
+            ))}
+        </Select>
+      ) : (
+        <Select label="Department *" value={initial.department} onChange={field("department")} error={errors.department}>
+          <option value="">Select Department</option>
+          {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+        </Select>
+      )}
       <Select label="Role *" value={initial.role} onChange={field("role")} error={errors.role}>
         <option value="">Select Role</option>
         <option value="EMPLOYEE">Employee</option>
@@ -5293,14 +5585,14 @@ function validateBalanceFields(form: EmployeeFormData): Record<string, string> {
 const EMPTY_FORM: EmployeeFormData = {
   employeeCode: "",
   firstName: "", lastName: "", email: "", phone: "",
-  position: "", department: "", role: "EMPLOYEE" as UserRole,
+  position: "", department: "", departmentId: "", role: "EMPLOYEE" as UserRole,
   managerId: "", status: "ACTIVE", password: "",
   annualDays: "14", casualDays: "7", permissionMinutes: "240",
   teamMemberIds: [],
 };
 
 function HREmployeesPage() {
-  const { employees, createEmployee, updateEmployee } = useStore();
+  const { employees, createEmployee, updateEmployee, isRemoteEmployee, departments } = useStore();
   const [search, setSearch] = useState("");
   const [filterRole, setFilterRole] = useState<"" | UserRole>("");
   const [filterDept, setFilterDept] = useState("");
@@ -5330,7 +5622,7 @@ function HREmployeesPage() {
   // Filtering
   const q = search.toLowerCase().trim();
   const filtered = employees.filter((e) => {
-    if (q && !e.name.toLowerCase().includes(q) && !e.id.toLowerCase().includes(q)) return false;
+    if (q && !e.name.toLowerCase().includes(q) && !e.id.toLowerCase().includes(q) && !(e.employeeCode?.toLowerCase().includes(q) ?? false)) return false;
     if (filterRole && e.role !== filterRole) return false;
     if (filterDept && e.department !== filterDept) return false;
     if (filterStatus && e.status !== filterStatus) return false;
@@ -5344,6 +5636,7 @@ function HREmployeesPage() {
       employeeCode: "",
       firstName: emp.firstName, lastName: emp.lastName, email: emp.email,
       phone: emp.phone ?? "", position: emp.position, department: emp.department,
+      departmentId: emp.departmentId ?? "",
       role: emp.role, managerId: emp.managerId ?? "", status: emp.status, password: "",
       annualDays: String(emp.entitlements?.ANNUAL ?? DEFAULT_ENTITLEMENTS.ANNUAL),
       casualDays: String(emp.entitlements?.CASUAL ?? DEFAULT_ENTITLEMENTS.CASUAL),
@@ -5364,9 +5657,17 @@ function HREmployeesPage() {
     Object.assign(errs, validateBalanceFields(addForm));
     if (Object.keys(errs).length > 0) { setAddErrors(errs); return; }
     setAddSaving(true);
-    await new Promise((r) => setTimeout(r, 600));
-    const result = createEmployee({
-      ...addForm,
+    const result = await createEmployee({
+      employeeCode: addForm.employeeCode,
+      firstName: addForm.firstName,
+      lastName: addForm.lastName,
+      email: addForm.email,
+      position: addForm.position,
+      role: addForm.role,
+      status: addForm.status,
+      password: addForm.password,
+      teamMemberIds: addForm.teamMemberIds,
+      departmentId: addForm.departmentId,
       managerId: addForm.managerId || null,
       phone: addForm.phone || undefined,
       annualDays: Number(addForm.annualDays),
@@ -5385,27 +5686,43 @@ function HREmployeesPage() {
       employees, editTarget.id
     );
     Object.assign(errs, validateBalanceFields(editForm));
+    // Real-employee password reset isn't wired up yet — their password lives
+    // in Supabase Auth, not the local credential store, and resetting it
+    // needs its own trusted server-side path (out of scope for Phase 6A,
+    // profiles only). Declined clearly rather than silently doing nothing.
+    if (editForm.password.trim() && isRemoteEmployee(editTarget.id)) {
+      errs.password = "Password reset for real employee accounts isn't available yet.";
+    }
     if (Object.keys(errs).length > 0) { setEditErrors(errs); return; }
     setEditSaving(true);
-    await new Promise((r) => setTimeout(r, 500));
-    updateEmployee(editTarget.id, {
+    const isReal = isRemoteEmployee(editTarget.id);
+    const result = await updateEmployee(editTarget.id, {
       firstName: editForm.firstName.trim(),
       lastName: editForm.lastName.trim(),
       name: `${editForm.firstName.trim()} ${editForm.lastName.trim()}`,
       email: editForm.email.trim().toLowerCase(),
       phone: editForm.phone.trim() || undefined,
       position: editForm.position.trim(),
-      department: editForm.department,
+      // Local demo employees keep the plain department string unchanged;
+      // a real employee's department is only ever set via departmentId —
+      // see updateEmployee's remote branch.
+      ...(isReal ? { departmentId: editForm.departmentId } : { department: editForm.department }),
       role: editForm.role,
       managerId: editForm.managerId || null,
       status: editForm.status,
       entitlements: { ANNUAL: Number(editForm.annualDays), CASUAL: Number(editForm.casualDays) },
       permissionMinutesPerMonth: Number(editForm.permissionMinutes),
     });
+    if (!result.ok) {
+      setEditErrors({ _form: result.error ?? "Could not save changes." });
+      setEditSaving(false);
+      return;
+    }
     // Left blank, the employee's existing password is untouched — HR is never
     // shown it and never asked to re-enter it. Only a non-empty value here
     // goes through the same salted-hash credential update createEmployee
-    // already uses for the initial password.
+    // already uses for the initial password. (Local demo employees only —
+    // guarded above for real employees.)
     if (editForm.password.trim()) {
       updateHRUserCredential(editTarget.id, { password: editForm.password.trim() });
     }
@@ -5449,6 +5766,9 @@ function HREmployeesPage() {
         >
           <option value="">All Departments</option>
           {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+          {departments
+            .filter((d) => !(DEPARTMENTS as readonly string[]).includes(d.name))
+            .map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
         </select>
         <select
           className="px-3 py-2 rounded-[8px] border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
@@ -5496,7 +5816,7 @@ function HREmployeesPage() {
                           </button>
                         </div>
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{emp.id}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{emp.employeeCode ?? emp.id}</td>
                       <td className="px-4 py-3 text-muted-foreground">{emp.position}</td>
                       <td className="px-4 py-3 text-muted-foreground">{emp.department}</td>
                       <td className="px-4 py-3 text-muted-foreground">{mgr ? mgr.name : "—"}</td>
@@ -5511,8 +5831,8 @@ function HREmployeesPage() {
                             Edit
                           </button>
                           <button
-                            onClick={() => {
-                              const res = updateEmployee(emp.id, { status: emp.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" });
+                            onClick={async () => {
+                              const res = await updateEmployee(emp.id, { status: emp.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" });
                               setActionError(res.ok ? "" : res.error ?? "");
                             }}
                             className="text-xs text-muted-foreground hover:text-foreground hover:underline"
@@ -5556,7 +5876,7 @@ function HREmployeesPage() {
             </Alert>
             <div className="rounded-[10px] border border-border divide-y divide-border">
               {[
-                { label: "Employee ID", value: addResult.employee.id },
+                { label: "Employee ID", value: addResult.employee.employeeCode ?? addResult.employee.id },
                 { label: "Name", value: addResult.employee.name },
                 { label: "Role", value: addResult.employee.role },
                 { label: "Manager", value: employees.find((e) => e.id === addResult.employee.managerId)?.name ?? "None" },
@@ -5594,14 +5914,19 @@ function HREmployeesPage() {
             <p className="text-xs text-muted-foreground">Share the temporary password with the employee so they can log in.</p>
           </div>
         ) : (
-          <EmployeeForm
-            initial={addForm}
-            managers={eligibleManagers}
-            allEmployees={employees}
-            errors={addErrors}
-            onChange={setAddForm}
-            isEdit={false}
-          />
+          <div className="flex flex-col gap-4">
+            {addErrors._form && <Alert variant="error">{addErrors._form}</Alert>}
+            <EmployeeForm
+              initial={addForm}
+              managers={eligibleManagers}
+              allEmployees={employees}
+              departments={departments}
+              errors={addErrors}
+              onChange={setAddForm}
+              isEdit={false}
+              useRealDepartments={true}
+            />
+          </div>
         )}
       </Modal>
 
@@ -5622,9 +5947,11 @@ function HREmployeesPage() {
           initial={editForm}
           managers={eligibleManagers.filter((m) => m.id !== editTarget?.id)}
           allEmployees={employees}
+          departments={departments}
           errors={editErrors}
           onChange={setEditForm}
           isEdit={true}
+          useRealDepartments={!!editTarget && isRemoteEmployee(editTarget.id)}
         />
       </Modal>
 
@@ -5649,7 +5976,7 @@ function HREmployeesPage() {
             </div>
             <div className="rounded-[10px] border border-border divide-y divide-border">
               {[
-                { label: "Employee ID", value: viewTarget.id },
+                { label: "Employee ID", value: viewTarget.employeeCode ?? viewTarget.id },
                 { label: "Email", value: viewTarget.email },
                 ...(viewTarget.phone ? [{ label: "Phone", value: viewTarget.phone }] : []),
                 { label: "Role", value: viewTarget.role.charAt(0) + viewTarget.role.slice(1).toLowerCase() },
@@ -6010,7 +6337,7 @@ function HRAttendancePage() {
             <Select label="Employee *" value={employeeId} onChange={(e) => { setEmployeeId(e.target.value); setError(""); }}>
               <option value="">Select employee</option>
               {activeEmployees.map((e) => (
-                <option key={e.id} value={e.id}>{e.name} — {e.id}</option>
+                <option key={e.id} value={e.id}>{e.name} — {e.employeeCode ?? e.id}</option>
               ))}
             </Select>
             <DatePicker label="Date *" value={date} onChange={(e) => { setDate(e.target.value); setError(""); }} />
@@ -6254,6 +6581,7 @@ function HRSettingsPage() {
         </Card>
 
         <HolidaysSection />
+        <DepartmentsSection />
       </div>
     </DashboardShell>
   );
@@ -6328,6 +6656,259 @@ function HolidaysSection() {
         )}
       </Card>
     </div>
+  );
+}
+
+// Real, Supabase-backed departments (supabase/migrations/20260906160000) — HR
+// controls employee department assignment; employees never edit their own
+// (see My Profile). No hard delete: archiving (status = INACTIVE) keeps
+// historical employee/profile references intact and just removes the
+// department from future assignment.
+function DepartmentsSection() {
+  const { departments, createDepartment, updateDepartment } = useStore();
+  const [newName, setNewName] = useState("");
+  const [addError, setAddError] = useState("");
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [editTarget, setEditTarget] = useState<DepartmentRecord | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editError, setEditError] = useState("");
+
+  async function handleAdd() {
+    setSaving(true);
+    const res = await createDepartment(newName);
+    setSaving(false);
+    if (!res.ok) { setAddError(res.error ?? "Could not add that department."); return; }
+    setNewName(""); setAddError(""); setOpen(false);
+  }
+
+  async function handleEdit() {
+    if (!editTarget) return;
+    setSaving(true);
+    const res = await updateDepartment(editTarget.id, { name: editName });
+    setSaving(false);
+    if (!res.ok) { setEditError(res.error ?? "Could not save changes."); return; }
+    setEditTarget(null); setEditName(""); setEditError("");
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-base font-semibold text-foreground">Departments</h3>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Manage the departments employees can be assigned to.
+          </p>
+        </div>
+        <Button variant="secondary" onClick={() => { setOpen((v) => !v); setNewName(""); setAddError(""); }}>
+          <Plus className="h-4 w-4" /> Add Department
+        </Button>
+      </div>
+
+      {open && (
+        <Card className="mb-3">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <Input
+                placeholder="Department name"
+                value={newName}
+                onChange={(e) => { setNewName(e.target.value); setAddError(""); }}
+                error={addError}
+              />
+            </div>
+            <div className="flex gap-2 pt-0.5">
+              <Button variant="primary" onClick={handleAdd} loading={saving}>Save</Button>
+              <Button variant="secondary" onClick={() => { setOpen(false); setAddError(""); }}>Cancel</Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <Card padding={false}>
+        {departments.length === 0 ? (
+          <div className="p-6">
+            <EmptyState icon={<Settings className="h-8 w-8 text-muted-foreground/40" />} title="No departments" description="Add a department to get started." />
+          </div>
+        ) : (
+          <div className="divide-y divide-border">
+            {departments.map((d) => (
+              <div key={d.id} className="flex items-center gap-4 px-4 py-3">
+                <div className="flex-1 min-w-0">
+                  {editTarget?.id === d.id ? (
+                    <div className="flex items-start gap-3">
+                      <div className="flex-1">
+                        <Input
+                          value={editName}
+                          onChange={(e) => { setEditName(e.target.value); setEditError(""); }}
+                          error={editError}
+                          placeholder="Department name"
+                        />
+                      </div>
+                      <div className="flex gap-2 pt-0.5">
+                        <Button variant="primary" onClick={handleEdit} loading={saving}>Save</Button>
+                        <Button variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm font-medium">{d.name}</p>
+                  )}
+                </div>
+                {editTarget?.id !== d.id && (
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    <StatusBadge status={d.status === "ACTIVE" ? "active" : "inactive"} />
+                    <button
+                      onClick={() => { setEditTarget(d); setEditName(d.name); setEditError(""); }}
+                      className="text-xs text-primary hover:underline font-medium"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => updateDepartment(d.id, { status: d.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" })}
+                      className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                    >
+                      {d.status === "ACTIVE" ? "Archive" : "Activate"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAGE: MY PROFILE
+// Every authenticated role (Phase 6A Extension). A user may edit their own
+// first name, last name, email, and phone — nothing else. Employee Code,
+// Role, Direct Manager, Status, Department and Position are organizational
+// identity/hierarchy, never editable here, shown read-only with a locked
+// visual treatment (disabled Input/Select). The database is the actual
+// security boundary — see profiles_protect_self_edit_fields
+// (20260906160400_profiles_self_update.sql); this form simply never offers
+// those fields as editable, for any role including HR.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function MyProfilePage() {
+  const { session } = useAuth();
+  const { employees, updateEmployee } = useStore();
+  const me = employees.find((e) => e.id === session!.user.id) ?? null;
+
+  const [firstName, setFirstName] = useState(me?.firstName ?? "");
+  const [lastName, setLastName] = useState(me?.lastName ?? "");
+  const [email, setEmail] = useState(me?.email ?? "");
+  const [phone, setPhone] = useState(me?.phone ?? "");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const manager = me?.managerId ? employees.find((e) => e.id === me.managerId) ?? null : null;
+
+  async function handleSave() {
+    const errs: Record<string, string> = {};
+    if (!firstName.trim()) errs.firstName = "First name is required.";
+    if (!lastName.trim()) errs.lastName = "Last name is required.";
+    if (!email.trim()) {
+      errs.email = "Email is required.";
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      errs.email = "Enter a valid email address.";
+    }
+    if (Object.keys(errs).length > 0) { setErrors(errs); setSaved(false); return; }
+
+    setSaving(true);
+    setSaved(false);
+    const result = await updateEmployee(me!.id, {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      name: `${firstName.trim()} ${lastName.trim()}`,
+      email: email.trim().toLowerCase(),
+      phone: phone.trim() || undefined,
+    });
+    setSaving(false);
+    if (!result.ok) {
+      setErrors({ _form: result.error ?? "Could not save changes." });
+      return;
+    }
+    setErrors({});
+    setSaved(true);
+  }
+
+  if (!me) {
+    return (
+      <DashboardShell activeNavId="profile" pageTitle="My Profile">
+        <Alert variant="error">Your profile could not be loaded.</Alert>
+      </DashboardShell>
+    );
+  }
+
+  return (
+    <DashboardShell activeNavId="profile" pageTitle="My Profile">
+      <div className="max-w-2xl">
+        {saved && <Alert variant="success" className="mb-4">Your profile has been updated.</Alert>}
+        {errors._form && <Alert variant="error" className="mb-4">{errors._form}</Alert>}
+
+        <Card className="mb-6">
+          <p className="text-sm font-medium mb-1">Personal Information</p>
+          <p className="text-xs text-muted-foreground mb-4">You can update these yourself.</p>
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input
+                label="First Name *"
+                value={firstName}
+                onChange={(e) => { setFirstName(e.target.value); setSaved(false); }}
+                error={errors.firstName}
+              />
+              <Input
+                label="Last Name *"
+                value={lastName}
+                onChange={(e) => { setLastName(e.target.value); setSaved(false); }}
+                error={errors.lastName}
+              />
+            </div>
+            <Input
+              label="Email *"
+              type="email"
+              value={email}
+              onChange={(e) => { setEmail(e.target.value); setSaved(false); }}
+              error={errors.email}
+            />
+            <Input
+              label="Phone"
+              value={phone}
+              onChange={(e) => { setPhone(e.target.value); setSaved(false); }}
+              placeholder="+20 10 0000 0000"
+            />
+            <div>
+              <Button variant="primary" onClick={handleSave} loading={saving}>
+                {saving ? "Saving…" : "Save Changes"}
+              </Button>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <p className="text-sm font-medium mb-1">Organizational Details</p>
+          <p className="text-xs text-muted-foreground mb-4">
+            Set and controlled by HR. Contact HR to request a change.
+          </p>
+          <div className="flex flex-col gap-4">
+            <Input label="Employee Code" value={me.employeeCode ?? me.id} disabled hint="Assigned at account creation and cannot be changed." />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input label="Role" value={ROLE_LABEL[me.role]} disabled />
+              <Input label="Status" value={me.status === "ACTIVE" ? "Active" : "Inactive"} disabled />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input label="Department" value={me.department || "—"} disabled />
+              <Input label="Position" value={me.position || "—"} disabled />
+            </div>
+            <Input label="Direct Manager" value={manager?.name ?? "None"} disabled />
+          </div>
+        </Card>
+      </div>
+    </DashboardShell>
   );
 }
 
@@ -6812,6 +7393,7 @@ const router = createRouter([
           { path: "/employee/requests", element: <EmployeeRequestsPage /> },
           { path: "/employee/requests/:id", element: <EmployeeRequestDetailPage /> },
           { path: "/employee/notifications", element: <EmployeeNotificationsPage /> },
+          { path: "/profile", element: <MyProfilePage /> },
           { path: "/employee/*", element: <Navigate to="/employee/dashboard" replace /> },
         ],
       },
