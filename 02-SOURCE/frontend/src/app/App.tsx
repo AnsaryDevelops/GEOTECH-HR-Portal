@@ -5147,16 +5147,6 @@ function EmployeeForm({
 
   return (
     <div className="flex flex-col gap-4">
-      {!isEdit && (
-        <Input
-          label="Employee Code *"
-          value={initial.employeeCode}
-          onChange={field("employeeCode")}
-          error={errors.employeeCode}
-          placeholder="e.g. ansary34"
-          hint="This is the code the employee will use to sign in."
-        />
-      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Input label="First Name *" value={initial.firstName} onChange={field("firstName")} error={errors.firstName} placeholder="First name" />
         <Input label="Last Name *" value={initial.lastName} onChange={field("lastName")} error={errors.lastName} placeholder="Last name" />
@@ -5228,15 +5218,25 @@ function EmployeeForm({
           autoComplete="new-password"
         />
       ) : (
-        <PasswordInput
-          label="Initial Password *"
-          value={initial.password}
-          onChange={field("password")}
-          error={errors.password}
-          hint="The employee signs in with their Employee Code and this password."
-          placeholder="Temporary password for this employee"
-          autoComplete="new-password"
-        />
+        <>
+          <Input
+            label="Employee Code *"
+            value={initial.employeeCode}
+            onChange={field("employeeCode")}
+            error={errors.employeeCode}
+            placeholder="e.g. ansary34"
+            hint="This is the code the employee will use to sign in."
+          />
+          <PasswordInput
+            label="Initial Password *"
+            value={initial.password}
+            onChange={field("password")}
+            error={errors.password}
+            hint="The employee signs in with their Employee Code and this password."
+            placeholder="Temporary password for this employee"
+            autoComplete="new-password"
+          />
+        </>
       )}
     </div>
   );
