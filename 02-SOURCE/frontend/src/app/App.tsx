@@ -379,11 +379,13 @@ interface PasswordInputProps
   extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "type"> {
   label?: string;
   error?: string;
+  hint?: string;
 }
 
 export function PasswordInput({
   label,
   error,
+  hint,
   id,
   disabled,
   className,
@@ -412,7 +414,7 @@ export function PasswordInput({
             className
           )}
           aria-invalid={!!error}
-          aria-describedby={error ? `${inputId}-err` : undefined}
+          aria-describedby={error ? `${inputId}-err` : hint ? `${inputId}-hint` : undefined}
           {...props}
         />
         <button
@@ -443,6 +445,11 @@ export function PasswordInput({
         >
           <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
           {error}
+        </p>
+      )}
+      {hint && !error && (
+        <p id={`${inputId}-hint`} className="text-xs text-muted-foreground">
+          {hint}
         </p>
       )}
     </div>
@@ -5194,8 +5201,26 @@ function EmployeeForm({
         </div>
       </div>
 
-      {!isEdit && (
-        <Input label="Initial Password *" type="password" value={initial.password} onChange={field("password")} error={errors.password} hint="The employee signs in with their Employee ID and this password." placeholder="Temporary password for this employee" />
+      {isEdit ? (
+        <PasswordInput
+          label="Password"
+          value={initial.password}
+          onChange={field("password")}
+          error={errors.password}
+          hint="Leave blank to keep the current password."
+          placeholder="Leave blank to keep the current password"
+          autoComplete="new-password"
+        />
+      ) : (
+        <PasswordInput
+          label="Initial Password *"
+          value={initial.password}
+          onChange={field("password")}
+          error={errors.password}
+          hint="The employee signs in with their Employee ID and this password."
+          placeholder="Temporary password for this employee"
+          autoComplete="new-password"
+        />
       )}
     </div>
   );
@@ -5329,6 +5354,13 @@ function HREmployeesPage() {
       entitlements: { ANNUAL: Number(editForm.annualDays), CASUAL: Number(editForm.casualDays) },
       permissionMinutesPerMonth: Number(editForm.permissionMinutes),
     });
+    // Left blank, the employee's existing password is untouched — HR is never
+    // shown it and never asked to re-enter it. Only a non-empty value here
+    // goes through the same salted-hash credential update createEmployee
+    // already uses for the initial password.
+    if (editForm.password.trim()) {
+      updateHRUserCredential(editTarget.id, { password: editForm.password.trim() });
+    }
     setEditSaving(false);
     setEditTarget(null);
   }
