@@ -1,1 +1,7 @@
 node_modules/
+
+# Real env files (Supabase URL/anon key locally, or anything else later) —
+# .env.example stays committed as documentation, actual values never do.
+.env
+.env.local
+.env.*.local

@@ -75,12 +75,14 @@ import type {
 import {
   signIn as authSignIn,
   getSession,
+  restoreSupabaseSession,
   signOut as authSignOut,
   dashboardPath,
   createHRUserCredential,
   updateHRUserCredential,
   subscribeToAuthChanges,
 } from "../lib/auth";
+import { isSupabaseConfigured } from "../lib/supabase";
 import companyLogoSrc from "../imports/GEO_Egypt_LOGO-01.png";
 import type { Session } from "../lib/auth";
 import { clsx, type ClassValue } from "clsx";
@@ -1553,14 +1555,37 @@ interface AuthContextValue {
 const AuthCtx = createContext<AuthContextValue | null>(null);
 
 function AuthProvider({ children }: { children?: React.ReactNode }) {
-  // getSession() rehydrates synchronously from storage, so a refresh or a deep
-  // link lands on the right page instead of bouncing to login. Because it is
-  // synchronous, ProtectedRoute needs no pending state.
+  // getSession() rehydrates synchronously from local storage, so a refresh or
+  // a deep link for an existing demo-account session lands on the right page
+  // instead of bouncing to login — unchanged from before Phase 5. A real
+  // Supabase session needs an async check instead (restoreSupabaseSession),
+  // so `ready` starts true only when there is nothing further to await: a
+  // local session was already found, or Supabase isn't configured in this
+  // environment at all (which is this repo's current state — this makes the
+  // loading gate below a complete no-op today).
   const [session, setSession] = useState<Session | null>(() => getSession());
+  const [ready, setReady] = useState(() => session !== null || !isSupabaseConfigured);
+
+  useEffect(() => {
+    if (ready) return;
+    let cancelled = false;
+    restoreSupabaseSession().then((s) => {
+      if (cancelled) return;
+      if (s) setSession(s);
+      setReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally runs once on mount only — `ready` flips to true exactly
+    // once and this effect has nothing left to do afterward.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // subscribeToAuthChanges was exported but never called, so nothing outside
   // this component could ever end a session. HR deactivating the signed-in
-  // account now propagates here immediately.
+  // account, or Supabase silently ending a session (e.g. an expired refresh
+  // token), now propagates here immediately.
   useEffect(() => subscribeToAuthChanges(setSession), []);
 
   const login = useCallback((s: Session) => {
@@ -1568,9 +1593,11 @@ function AuthProvider({ children }: { children?: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    authSignOut();
+    void authSignOut();
     setSession(null);
   }, []);
+
+  if (!ready) return null;
 
   return (
     <AuthCtx.Provider value={{ session, login, logout }}>

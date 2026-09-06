@@ -384,6 +384,14 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+[functions.provision-employee]
+enabled = true
+# Supabase's own gateway rejects an unauthenticated request before it ever
+# reaches the function — the function's own getUser()/is_hr() check
+# (supabase/functions/provision-employee/index.ts) is a second, independent
+# verification, not the only one.
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327

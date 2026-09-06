@@ -1,23 +1,40 @@
 // Authentication layer.
 //
 // IDENTITY CONTRACT — the single most important rule in this codebase:
-//   session.user.id === EmployeeProfile.id === "EMP-NNNNN"
-// The previous build returned the Supabase profiles UUID here while store.ts
-// keyed everything by "EMP-NNNNN". The two never matched, so every lookup
-// (manager resolution, My Team, request ownership, notifications) silently
-// returned nothing. One key space, everywhere.
+//   session.user.id === EmployeeProfile.id (local accounts) OR
+//   session.user.id === profiles.id === auth.users.id (real Supabase accounts)
+// The previous build broke by mixing these two spaces up. They are kept
+// deliberately distinct here too: a local demo account's id stays
+// "EMP-NNNNN"-shaped and is looked up in store.ts; a real Supabase account's
+// id is the auth.users UUID and is looked up in the `profiles` table. Never
+// assume one id shape implies the other.
 //
-// The employee record in the store is the source of truth for role and status,
-// so HR deactivating an account or changing a role takes effect on the very
-// next sign-in — no separate mirror to drift out of sync.
+// PHASE 5 — hybrid, transitional design. Real employee accounts, once
+// created through the provision-employee Edge Function (see that file for
+// the full chain), authenticate through actual Supabase Auth: the Employee
+// Code is translated to a synthetic, non-mailable email
+// (`<code>@auth.internal`, matching PRODUCTION-BACKEND-PLAN.md §6.2) and
+// signed in via supabase.auth.signInWithPassword. The existing seeded demo
+// accounts are not migrated yet (Phase 6) and have no Supabase Auth user at
+// all, so they keep authenticating through the original localStorage
+// credential store below, unchanged. signIn() tries Supabase first and
+// falls back to the local store only when Supabase reports "no such
+// account" — see signIn()'s own comment for why that ordering, and why
+// falling back on an ambiguous error is safe.
+//
+// The employee record (local store, or the `profiles` table under RLS) is
+// always the source of truth for role and status, so HR deactivating an
+// account or changing a role takes effect on the very next sign-in — no
+// separate mirror to drift out of sync, for either account type.
 
 import { loadStore } from './store'
 import type { UserRole } from './store'
+import { supabase, isSupabaseConfigured } from './supabase'
 
 export type { UserRole }
 
 export interface SessionUser {
-  id: string // "EMP-00001" — same key space as EmployeeProfile.id
+  id: string
   name: string
   role: UserRole
   employeeNumber: string
@@ -48,11 +65,14 @@ interface CredentialRecord {
   hash: string
 }
 
-// ─── Password hashing ─────────────────────────────────────────────────────────
+// ─── Password hashing (local demo accounts only) ──────────────────────────────
 // Synchronous by necessity: the HR "create employee" path is a synchronous
-// React event handler. This keeps plaintext out of storage, which is the point,
-// but it is NOT a production KDF. When the server-side layer lands, hashing
-// moves to the server and uses bcrypt or argon2id.
+// React event handler. This keeps plaintext out of storage, which is the
+// point, but it is NOT a production KDF, and it is not used for real
+// accounts at all — Supabase Auth (GoTrue) owns those passwords entirely,
+// hashed server-side with bcrypt, never touching this code path or
+// PostgreSQL (§6.4). This hashing exists solely to keep the pre-existing
+// local demo accounts working during this transitional phase.
 
 function hashPassword(password: string, salt: string): string {
   let h1 = 0x811c9dc5
@@ -86,7 +106,7 @@ function safeEqual(a: string, b: string): boolean {
   return diff === 0
 }
 
-// ─── Credential storage ───────────────────────────────────────────────────────
+// ─── Credential storage (local demo accounts only) ────────────────────────────
 
 function makeCredential(employeeNumber: string, password: string): CredentialRecord {
   const salt = makeSalt()
@@ -125,10 +145,15 @@ function saveCredentials(records: CredentialRecord[]): void {
   }
 }
 
-// ─── Session persistence ──────────────────────────────────────────────────────
+// ─── Session state ─────────────────────────────────────────────────────────────
 
 let currentSession: Session | null = null
 let restored = false
+// Which path the live session came from, so signOut() and the Supabase
+// auth-state listener only ever act on a session they are actually
+// responsible for — a local demo session must never be torn down by a
+// Supabase SIGNED_OUT event that has nothing to do with it, and vice versa.
+let sessionSource: 'local' | 'supabase' | null = null
 const authListeners = new Set<(session: Session | null) => void>()
 
 function persistSession(session: Session | null): void {
@@ -144,8 +169,13 @@ function notify(session: Session | null): void {
   for (const listener of authListeners) listener(session)
 }
 
-// Rebuilds the session from storage, re-reading role and status from the
+// Rebuilds a LOCAL session from storage, re-reading role and status from the
 // employee record so a revoked or demoted account cannot ride an old token.
+// Synchronous and local-store-only by design — this is what lets
+// AuthProvider render immediately for the common case (no reload delay) and
+// keeps this function's existing behavior completely unchanged for demo
+// accounts. Restoring a real Supabase session is a separate, async path —
+// see restoreSupabaseSession() below.
 function restoreSession(): Session | null {
   if (restored) return currentSession
   restored = true
@@ -177,14 +207,171 @@ function restoreSession(): Session | null {
       },
       expiresAt: stored.expiresAt,
     }
+    sessionSource = 'local'
     return currentSession
   } catch {
     return null
   }
 }
 
+/** Synchronous, local-only restoration — unchanged from before Phase 5. */
 export function getSession(): Session | null {
   return restoreSession()
+}
+
+// ─── Supabase Auth ─────────────────────────────────────────────────────────────
+
+const SYNTHETIC_EMAIL_DOMAIN = 'auth.internal'
+
+/**
+ * Deterministic translation from the business login identifier to Supabase
+ * Auth's required email handle — never shown in the UI, never used for real
+ * mail delivery, fully decoupled from the profile's real contact email
+ * (§6.2). The provision-employee Edge Function must derive this identically
+ * when creating the Auth user, or sign-in will never find it.
+ */
+function employeeCodeToSyntheticEmail(employeeCode: string): string {
+  return `${employeeCode.toLowerCase()}@${SYNTHETIC_EMAIL_DOMAIN}`
+}
+
+interface ProfileRow {
+  id: string
+  employee_code: string
+  name: string
+  role: UserRole
+  status: 'ACTIVE' | 'INACTIVE'
+}
+
+/**
+ * Reads the caller's own profile under RLS (profiles_select_self, Phase 3 —
+ * `id = auth.uid()`) and enforces the same "inactive accounts cannot use a
+ * live session" rule the local path has always had (§6.7).
+ */
+async function resolveActiveProfile(uid: string): Promise<{ profile: ProfileRow } | { error: AuthError }> {
+  if (!supabase) return { error: 'SYSTEM_ERROR' }
+
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, employee_code, name, role, status')
+      .eq('id', uid)
+      .single()
+
+    if (error || !data) return { error: 'SYSTEM_ERROR' }
+    if (data.status !== 'ACTIVE') return { error: 'INACTIVE_ACCOUNT' }
+    return { profile: data as ProfileRow }
+  } catch {
+    return { error: 'SYSTEM_ERROR' }
+  }
+}
+
+function toSession(profile: ProfileRow, expiresAtSeconds: number | undefined): Session {
+  return {
+    user: {
+      id: profile.id,
+      name: profile.name,
+      role: profile.role,
+      employeeNumber: profile.employee_code,
+    },
+    expiresAt: (expiresAtSeconds ?? Math.floor(Date.now() / 1000) + 8 * 60 * 60) * 1000,
+  }
+}
+
+/**
+ * Attempts sign-in through real Supabase Auth. Returns `null` — meaning "not
+ * applicable, the caller should try the local path" — only when the
+ * sign-in call itself failed (no such Auth user, or a wrong password).
+ * Supabase deliberately returns the same generic error for both cases (the
+ * same anti-enumeration reasoning the local path already follows), so this
+ * function cannot and does not try to distinguish them; a wrong password for
+ * a real account simply falls through to a local lookup that also fails,
+ * ending in the same INVALID_CREDENTIALS result either way — never a
+ * different, more permissive one. Once sign-in itself succeeds, every
+ * subsequent outcome (inactive account, system error) is definitive and is
+ * returned directly, never falling through.
+ */
+async function signInWithSupabase(employeeCode: string, password: string): Promise<AuthResult | null> {
+  if (!supabase) return null
+
+  let authResponse
+  try {
+    authResponse = await supabase.auth.signInWithPassword({
+      email: employeeCodeToSyntheticEmail(employeeCode),
+      password,
+    })
+  } catch {
+    return null
+  }
+
+  const { data, error } = authResponse
+  if (error || !data.session) return null
+
+  const profileResult = await resolveActiveProfile(data.session.user.id)
+  if ('error' in profileResult) {
+    if (profileResult.error === 'INACTIVE_ACCOUNT') {
+      // Valid credentials, but the account is deactivated — end the
+      // Supabase session immediately rather than leaving a live, unusable
+      // token behind.
+      await supabase.auth.signOut()
+    }
+    return { ok: false, error: profileResult.error }
+  }
+
+  const session = toSession(profileResult.profile, data.session.expires_at)
+  currentSession = session
+  sessionSource = 'supabase'
+  restored = true
+  notify(session)
+  // Supabase's own client already persists its session under its own
+  // localStorage key — persistSession()/SESSION_KEY is the local-path
+  // mechanism only, not duplicated here.
+  return { ok: true, session }
+}
+
+/**
+ * Re-checks a real Supabase session on page load. Async by nature (unlike
+ * the local restoreSession()), so AuthProvider only calls this when there is
+ * no local session to restore synchronously first — see App.tsx.
+ */
+export async function restoreSupabaseSession(): Promise<Session | null> {
+  if (!supabase) return null
+
+  try {
+    const { data } = await supabase.auth.getSession()
+    if (!data.session) return null
+
+    const profileResult = await resolveActiveProfile(data.session.user.id)
+    if ('error' in profileResult) {
+      if (profileResult.error === 'INACTIVE_ACCOUNT') {
+        await supabase.auth.signOut()
+      }
+      return null
+    }
+
+    const session = toSession(profileResult.profile, data.session.expires_at)
+    currentSession = session
+    sessionSource = 'supabase'
+    restored = true
+    notify(session)
+    return session
+  } catch {
+    return null
+  }
+}
+
+if (supabase) {
+  supabase.auth.onAuthStateChange((event) => {
+    // Only ever acts on a session this module currently believes is
+    // Supabase-backed — a local demo session is untouched by Supabase's own
+    // lifecycle events, and this listener does not duplicate the explicit
+    // handling already done in signInWithSupabase/restoreSupabaseSession/
+    // signOut for SIGNED_IN and token refresh.
+    if (event === 'SIGNED_OUT' && sessionSource === 'supabase') {
+      currentSession = null
+      sessionSource = null
+      notify(null)
+    }
+  })
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -196,8 +383,17 @@ export async function signIn(employeeNumber: string, password: string): Promise<
     return { ok: false, error: 'INVALID_CREDENTIALS' }
   }
 
+  if (isSupabaseConfigured) {
+    const supabaseResult = await signInWithSupabase(normalized, password)
+    if (supabaseResult) return supabaseResult
+    // null: no matching Supabase Auth user (or an unreachable/misconfigured
+    // Supabase project) — fall through to the existing local accounts below,
+    // exactly as if Supabase were not configured at all.
+  }
+
   try {
-    // Simulated round trip so the caller's loading state is observable.
+    // Simulated round trip so the caller's loading state is observable —
+    // unchanged from before Phase 5.
     await new Promise((resolve) => setTimeout(resolve, 400))
 
     const credential = loadCredentials().find((c) => c.employeeNumber === normalized)
@@ -227,6 +423,7 @@ export async function signIn(employeeNumber: string, password: string): Promise<
     }
 
     currentSession = session
+    sessionSource = 'local'
     restored = true
     persistSession(session)
     notify(session)
@@ -237,8 +434,19 @@ export async function signIn(employeeNumber: string, password: string): Promise<
   }
 }
 
-export function signOut(): void {
+export async function signOut(): Promise<void> {
+  if (supabase && sessionSource === 'supabase') {
+    try {
+      await supabase.auth.signOut()
+    } catch {
+      // Non-fatal: local state is cleared unconditionally below regardless,
+      // so the app's own UI always reflects "signed out" even if the
+      // network call itself failed.
+    }
+  }
+
   currentSession = null
+  sessionSource = null
   restored = true
   persistSession(null)
   notify(null)
@@ -267,9 +475,9 @@ export function subscribeToAuthChanges(callback: (session: Session | null) => vo
   }
 }
 
-// ─── HR-driven account management ─────────────────────────────────────────────
-// These were empty no-ops. HR could "create" an employee who could never log in,
-// and "deactivate" one whose access was never revoked.
+// ─── HR-driven account management (local demo accounts only) ─────────────────
+// Real accounts never reach these — their credentials live entirely inside
+// Supabase Auth, created via provisionEmployeeAccount() below, never here.
 
 export function createHRUserCredential(data: {
   employeeNumber: string
@@ -295,12 +503,94 @@ export function updateHRUserCredential(
   // Name, role and status are read from the employee record on every sign-in
   // and on every session restore, so a deactivation or demotion is enforced
   // immediately without a mirrored copy here.
-  if (updates.active === false && currentSession?.user.id === employeeNumber) {
-    signOut()
+  if (updates.active === false && sessionSource === 'local' && currentSession?.user.id === employeeNumber) {
+    void signOut()
   }
 }
 
 /** Development helper — the seeded password. Never rendered in the UI. */
 export function getDemoPassword(): string {
   return DEMO_PASSWORD
+}
+
+// ─── Real employee provisioning (Supabase) ────────────────────────────────────
+
+export interface ProvisionEmployeeInput {
+  role: 'EMPLOYEE' | 'MANAGER'
+  employeeCode: string
+  password: string
+  firstName: string
+  lastName: string
+  position: string
+  department: string
+  email: string
+  phone?: string
+  managerId?: string | null
+  permissionMinutesPerMonth?: number
+  /** MANAGER only — see hr_create_manager_with_team (§5.5). */
+  teamMemberIds?: string[]
+}
+
+export type ProvisionEmployeeResult =
+  | { ok: true; profile: { id: string; employee_code: string; name: string; role: UserRole } }
+  | { ok: false; error: string }
+
+/**
+ * Calls the provision-employee Edge Function — the only path that creates a
+ * real Auth user and its matching profiles row. This function is
+ * intentionally not yet wired into the Add Employee form's default submit
+ * handler: doing so is Phase 6 (full frontend data migration) work, since a
+ * Supabase-provisioned employee will not appear anywhere in this app's
+ * current localStorage-backed views until that migration happens. It is
+ * implemented and exported now so Phase 6 has nothing left to build at the
+ * auth-boundary layer — only the UI wiring.
+ *
+ * No plaintext password is stored anywhere by this function or by the Edge
+ * Function it calls — the password is transmitted once, over this
+ * authenticated call, straight into Supabase Auth Admin's createUser(), and
+ * is never written to a Postgres table, a log, or localStorage.
+ */
+export async function provisionEmployeeAccount(
+  input: ProvisionEmployeeInput
+): Promise<ProvisionEmployeeResult> {
+  if (!supabase) {
+    return { ok: false, error: 'Supabase is not configured in this environment.' }
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session) {
+    return { ok: false, error: 'You must be signed in as HR to create an account.' }
+  }
+
+  try {
+    const { data, error } = await supabase.functions.invoke('provision-employee', {
+      body: {
+        role: input.role,
+        employee_code: input.employeeCode,
+        password: input.password,
+        first_name: input.firstName,
+        last_name: input.lastName,
+        position: input.position,
+        department: input.department,
+        email: input.email,
+        phone: input.phone,
+        manager_id: input.managerId ?? null,
+        permission_minutes_per_month: input.permissionMinutesPerMonth,
+        team_member_ids: input.teamMemberIds ?? [],
+      },
+    })
+
+    if (error) {
+      return { ok: false, error: error.message }
+    }
+    if (!data?.profile) {
+      return { ok: false, error: 'Unexpected response from the server.' }
+    }
+
+    return { ok: true, profile: data.profile }
+  } catch {
+    return { ok: false, error: 'Could not reach the server. Please try again.' }
+  }
 }
