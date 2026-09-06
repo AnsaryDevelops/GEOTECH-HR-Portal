@@ -332,10 +332,17 @@ export interface ApprovalStep {
  * Builds the approval chain for one employee: direct manager, then the
  * technical manager, then the general manager.
  *
- * Two rules keep the chain sane in a small organisation:
- *   - the requester is never their own approver, and
+ * Three rules keep the chain sane in a small organisation:
+ *   - the requester is never their own approver,
  *   - a person who appears twice (a department manager whose own direct
- *     manager IS the technical manager, for example) is only asked once.
+ *     manager IS the technical manager, for example) is only asked once, and
+ *   - HR never routes through the Technical Manager tier at all (Phase
+ *     6A.1) — HR's direct manager is always the General Manager
+ *     (employees[].managerId, the same single source of truth every other
+ *     approver relationship uses), so an HR requester's chain omits the
+ *     Technical Manager candidate outright rather than relying on the
+ *     already-seen dedup above, which only catches the exact same PERSON
+ *     appearing twice, not "this tier does not apply to this requester."
  *
  * Inactive approvers are dropped rather than blocking the request; the caller
  * decides what to do with an empty chain.
@@ -344,12 +351,19 @@ export function buildApprovalChain(
   employees: EmployeeProfile[],
   employeeId: string
 ): ApprovalStep[] {
+  const requester = employees.find((e) => e.id === employeeId);
   const directManager = getManagerForEmployee(employees, employeeId);
-  const candidates: Array<{ role: UserRole; person: EmployeeProfile | null }> = [
-    { role: "MANAGER", person: directManager },
-    { role: "TECH_MANAGER", person: getTechManager(employees) },
-    { role: "GM", person: getGeneralManager(employees) },
-  ];
+  const candidates: Array<{ role: UserRole; person: EmployeeProfile | null }> =
+    requester?.role === "HR"
+      ? [
+          { role: "MANAGER", person: directManager },
+          { role: "GM", person: getGeneralManager(employees) },
+        ]
+      : [
+          { role: "MANAGER", person: directManager },
+          { role: "TECH_MANAGER", person: getTechManager(employees) },
+          { role: "GM", person: getGeneralManager(employees) },
+        ];
 
   const chain: ApprovalStep[] = [];
   const seen = new Set<string>([employeeId]);

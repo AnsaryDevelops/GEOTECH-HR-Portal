@@ -1644,6 +1644,8 @@ interface StoreContextValue {
   holidays: HolidayRecord[];
   /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. */
   departments: DepartmentRecord[];
+  /** The singleton Technical Manager/General Manager routing slots — null values mean "not yet configured." */
+  approvalRouting: { technicalManagerId: string | null; generalManagerId: string | null } | null;
   createLeaveRequest: (
     employeeId: string, employeeName: string,
     data: { leaveType: string; startDate: string; endDate: string; reason?: string }
@@ -1675,6 +1677,17 @@ interface StoreContextValue {
   createDepartment: (name: string) => Promise<{ ok: boolean; error?: string }>;
   /** HR-only; covers rename and archive/reactivate. RLS (departments_update_hr) re-enforces server-side. */
   updateDepartment: (id: string, updates: { name?: string; status?: "ACTIVE" | "INACTIVE" }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * HR-only; the only writer of company_approval_routing (Phase 6A.1). Pass
+   * null for a slot to leave it unchanged — this can promote but never
+   * clear a slot back to unconfigured, matching set_approval_routing's own
+   * contract. Also keeps every HR profile's manager_id pointed at whoever
+   * ends up holding the General Manager slot.
+   */
+  setApprovalRouting: (
+    technicalManagerId: string | null,
+    generalManagerId: string | null
+  ) => Promise<{ ok: boolean; error?: string }>;
   createPermissionRequest: (
     employeeId: string, employeeName: string,
     data: { permissionKind: PermissionKind; date: string; minutes: number; reason?: string }
@@ -1793,6 +1806,38 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }
   }, []);
 
+  // The singleton TM/GM routing row (Phase 6A.1) — readable by every
+  // authenticated user (company_approval_routing_select_all), null slots
+  // mean "not yet configured," not an error.
+  const [approvalRouting, setApprovalRoutingState] = useState<{
+    technicalManagerId: string | null;
+    generalManagerId: string | null;
+  } | null>(null);
+
+  const fetchApprovalRouting = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setApprovalRoutingState(null);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("company_approval_routing")
+        .select("technical_manager_id, general_manager_id")
+        .eq("id", 1)
+        .maybeSingle();
+      if (error || !data) {
+        setApprovalRoutingState(null);
+        return;
+      }
+      setApprovalRoutingState({
+        technicalManagerId: data.technical_manager_id,
+        generalManagerId: data.general_manager_id,
+      });
+    } catch {
+      setApprovalRoutingState(null);
+    }
+  }, []);
+
   // Re-fetch whenever the signed-in session changes (login/logout/switching
   // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
   // session is actually allowed to see (self/reports/own-manager for a
@@ -1805,7 +1850,8 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   useEffect(() => {
     fetchRemoteEmployees();
     fetchDepartments();
-  }, [session, fetchRemoteEmployees, fetchDepartments]);
+    fetchApprovalRouting();
+  }, [session, fetchRemoteEmployees, fetchDepartments, fetchApprovalRouting]);
 
   // The one list every page already reads via useStore().employees — local
   // demo roster first, then real Supabase employees. No id collision is
@@ -2422,17 +2468,39 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return { ok: true };
   }
 
+  // HR-only (set_approval_routing's own is_hr() check re-enforces this
+  // server-side — no direct client write grant exists on
+  // company_approval_routing at all, this RPC is the only writer). Also the
+  // one place profiles.role and every HR profile's manager_id get kept in
+  // sync with the routing slots (Phase 6A.1) — both handled inside the RPC
+  // itself, never duplicated here.
+  async function setApprovalRouting(
+    technicalManagerId: string | null,
+    generalManagerId: string | null
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    const { error } = await supabase.rpc("set_approval_routing", {
+      new_technical_manager_id: technicalManagerId,
+      new_general_manager_id: generalManagerId,
+    });
+    if (error) return { ok: false, error: error.message };
+    // Roles and manager_id may have changed for up to four profiles (old/new
+    // TM, old/new GM, plus every HR profile) — a plain re-fetch is simplest.
+    await Promise.all([fetchApprovalRouting(), fetchRemoteEmployees()]);
+    return { ok: true };
+  }
+
   return (
     <StoreCtx.Provider value={{
       requests: store.requests, notifications: store.notifications,
       employees, leaveTypes: store.leaveTypes,
       attendance: store.attendance, holidays: store.holidays,
-      departments,
+      departments, approvalRouting,
       createLeaveRequest, createMissionRequest, createPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
       approveRequest, rejectRequest, deleteRequest, markNotificationRead, markAllNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
-      createDepartment, updateDepartment,
+      createDepartment, updateDepartment, setApprovalRouting,
     }}>
       {children}
     </StoreCtx.Provider>
@@ -6582,6 +6650,7 @@ function HRSettingsPage() {
 
         <HolidaysSection />
         <DepartmentsSection />
+        <ApprovalRoutingSection />
       </div>
     </DashboardShell>
   );
@@ -6775,6 +6844,81 @@ function DepartmentsSection() {
             ))}
           </div>
         )}
+      </Card>
+    </div>
+  );
+}
+
+// The Technical Manager and General Manager are singleton roles that sit at
+// the top of every approval chain (company_approval_routing) — set once via
+// set_approval_routing, the only writer for that table. Setting the General
+// Manager also keeps every HR profile's Direct Manager (profiles.manager_id)
+// pointed at them automatically (Phase 6A.1) — nothing here writes that
+// relationship directly, it is entirely a side effect of the RPC call.
+// Candidates are restricted to real (Supabase-backed) active employees —
+// company_approval_routing references profiles.id, which a local demo
+// employee has no row for.
+function ApprovalRoutingSection() {
+  const { employees, approvalRouting, setApprovalRouting, isRemoteEmployee } = useStore();
+  const [tmId, setTmId] = useState(approvalRouting?.technicalManagerId ?? "");
+  const [gmId, setGmId] = useState(approvalRouting?.generalManagerId ?? "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setTmId(approvalRouting?.technicalManagerId ?? "");
+    setGmId(approvalRouting?.generalManagerId ?? "");
+  }, [approvalRouting]);
+
+  const candidates = employees.filter((e) => isRemoteEmployee(e.id) && e.status === "ACTIVE");
+
+  async function handleSave() {
+    if (tmId && gmId && tmId === gmId) {
+      setError("The Technical Manager and General Manager must be different people.");
+      return;
+    }
+    setSaving(true);
+    setSaved(false);
+    const res = await setApprovalRouting(tmId || null, gmId || null);
+    setSaving(false);
+    if (!res.ok) { setError(res.error ?? "Could not save approval routing."); return; }
+    setError("");
+    setSaved(true);
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="mb-3">
+        <h3 className="text-base font-semibold text-foreground">Approval Routing</h3>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          The Technical Manager and General Manager sit at the top of every approval chain. HR's own Direct Manager is kept in sync with the General Manager automatically.
+        </p>
+      </div>
+      <Card>
+        {error && <Alert variant="error" className="mb-4">{error}</Alert>}
+        {saved && <Alert variant="success" className="mb-4">Approval routing updated.</Alert>}
+        <div className="flex flex-col gap-4">
+          <Select
+            label="Technical Manager"
+            value={tmId}
+            onChange={(e) => { setTmId(e.target.value); setSaved(false); }}
+          >
+            <option value="">Not yet configured</option>
+            {candidates.filter((e) => e.id !== gmId).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </Select>
+          <Select
+            label="General Manager"
+            value={gmId}
+            onChange={(e) => { setGmId(e.target.value); setSaved(false); }}
+          >
+            <option value="">Not yet configured</option>
+            {candidates.filter((e) => e.id !== tmId).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </Select>
+          <div>
+            <Button variant="primary" onClick={handleSave} loading={saving}>{saving ? "Saving…" : "Save Routing"}</Button>
+          </div>
+        </div>
       </Card>
     </div>
   );
