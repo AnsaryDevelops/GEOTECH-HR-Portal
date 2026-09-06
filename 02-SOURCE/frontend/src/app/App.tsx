@@ -2052,8 +2052,10 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
 
     // The Employee Code HR enters is the one identifier — it is the id, not a
     // second field pointing at the same person (see validateEmployeeFields'
-    // uniqueness check, which already treats both spaces as one).
-    const id = data.employeeCode.trim();
+    // uniqueness check, which already treats both spaces as one). Canonical
+    // form is uppercase, matching signIn()'s own normalization — storing it
+    // verbatim would let a lowercase/mixed-case code fail to log in.
+    const id = data.employeeCode.trim().toUpperCase();
     const name = `${data.firstName.trim()} ${data.lastName.trim()}`;
     const employee: EmployeeProfile = {
       id, employeeCode: id, name, firstName: data.firstName.trim(), lastName: data.lastName.trim(),
