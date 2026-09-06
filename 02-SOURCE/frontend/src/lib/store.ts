@@ -88,6 +88,14 @@ export const DEFAULT_LEAVE_TYPES: LeaveTypeRecord[] = [
 
 export interface EmployeeProfile {
   id: string;
+  /**
+   * The company's existing Employee Code (e.g. "ansary34") — entered manually
+   * by HR at account creation, never auto-generated. This is the employee's
+   * login identifier. Optional only because employees seeded before this
+   * field existed have none; every employee created through the Add Employee
+   * form always has one.
+   */
+  employeeCode?: string;
   name: string;       // "Jordan Lee" — canonical display name
   firstName: string;
   lastName: string;
@@ -642,6 +650,7 @@ export function wouldCreateCycle(
 
 export function validateEmployeeFields(
   data: {
+    employeeCode?: string;
     firstName?: string;
     lastName?: string;
     email?: string;
@@ -655,6 +664,21 @@ export function validateEmployeeFields(
   editingId?: string
 ): Record<string, string> {
   const errors: Record<string, string> = {};
+
+  // Employee Code is collected only on the Add Employee form — editingId is
+  // set exclusively by the Edit Employee path (§ HREmployeesPage.handleEdit),
+  // which never surfaces this field, so this block never runs there.
+  if (!editingId) {
+    const code = data.employeeCode?.trim() ?? "";
+    if (!code) {
+      errors.employeeCode = "Employee Code is required.";
+    } else {
+      const dup = employees.some(
+        (e) => e.id.toLowerCase() === code.toLowerCase() || e.employeeCode?.toLowerCase() === code.toLowerCase()
+      );
+      if (dup) errors.employeeCode = "This Employee Code is already in use.";
+    }
+  }
 
   if (!data.firstName?.trim()) errors.firstName = "First name is required.";
   if (!data.lastName?.trim()) errors.lastName = "Last name is required.";

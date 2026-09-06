@@ -1590,6 +1590,8 @@ export function useAuth(): AuthContextValue {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface CreateEmployeeInput {
+  /** Manually entered by HR; becomes the employee's id and login identifier — see createEmployee. */
+  employeeCode: string;
   firstName: string; lastName: string; email: string; phone?: string;
   position: string; department: string; role: UserRole;
   managerId: string | null; status: "ACTIVE" | "INACTIVE"; password: string;
@@ -2048,11 +2050,13 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     const errs = validateEmployeeFields(data, store.employees);
     if (Object.keys(errs).length > 0) return { ok: false as const, errors: errs };
 
-    const seq = String(store.nextEmpSeq).padStart(5, "0");
-    const id = `EMP-${seq}`;
+    // The Employee Code HR enters is the one identifier — it is the id, not a
+    // second field pointing at the same person (see validateEmployeeFields'
+    // uniqueness check, which already treats both spaces as one).
+    const id = data.employeeCode.trim();
     const name = `${data.firstName.trim()} ${data.lastName.trim()}`;
     const employee: EmployeeProfile = {
-      id, name, firstName: data.firstName.trim(), lastName: data.lastName.trim(),
+      id, employeeCode: id, name, firstName: data.firstName.trim(), lastName: data.lastName.trim(),
       position: data.position.trim(), department: data.department,
       email: data.email.trim().toLowerCase(),
       phone: data.phone?.trim() || undefined,
@@ -5010,6 +5014,8 @@ function HRDashboardPage() {
 // ─── Employee form (used by Add and Edit) ─────────────────────────────────────
 
 interface EmployeeFormData {
+  /** Add-only: manually entered by HR, becomes the new employee's login identifier. */
+  employeeCode: string;
   firstName: string; lastName: string; email: string; phone: string;
   position: string; department: string; role: UserRole;
   managerId: string; status: "ACTIVE" | "INACTIVE"; password: string;
@@ -5141,6 +5147,16 @@ function EmployeeForm({
 
   return (
     <div className="flex flex-col gap-4">
+      {!isEdit && (
+        <Input
+          label="Employee Code *"
+          value={initial.employeeCode}
+          onChange={field("employeeCode")}
+          error={errors.employeeCode}
+          placeholder="e.g. ansary34"
+          hint="This is the code the employee will use to sign in."
+        />
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Input label="First Name *" value={initial.firstName} onChange={field("firstName")} error={errors.firstName} placeholder="First name" />
         <Input label="Last Name *" value={initial.lastName} onChange={field("lastName")} error={errors.lastName} placeholder="Last name" />
@@ -5217,7 +5233,7 @@ function EmployeeForm({
           value={initial.password}
           onChange={field("password")}
           error={errors.password}
-          hint="The employee signs in with their Employee ID and this password."
+          hint="The employee signs in with their Employee Code and this password."
           placeholder="Temporary password for this employee"
           autoComplete="new-password"
         />
@@ -5246,6 +5262,7 @@ function validateBalanceFields(form: EmployeeFormData): Record<string, string> {
 }
 
 const EMPTY_FORM: EmployeeFormData = {
+  employeeCode: "",
   firstName: "", lastName: "", email: "", phone: "",
   position: "", department: "", role: "EMPLOYEE" as UserRole,
   managerId: "", status: "ACTIVE", password: "",
@@ -5294,6 +5311,8 @@ function HREmployeesPage() {
   function openEdit(emp: EmployeeProfile) {
     setEditTarget(emp);
     setEditForm({
+      // Add-only field, unused in Edit — see EmployeeForm's isEdit guard.
+      employeeCode: "",
       firstName: emp.firstName, lastName: emp.lastName, email: emp.email,
       phone: emp.phone ?? "", position: emp.position, department: emp.department,
       role: emp.role, managerId: emp.managerId ?? "", status: emp.status, password: "",
@@ -6526,7 +6545,7 @@ function DesignSystemPage() {
 
 const LOGIN_ERROR_MESSAGES: Partial<Record<LoginState, string>> = {
   invalid_credentials:
-    "Invalid Employee ID or password. Please check your credentials and try again.",
+    "Invalid Employee Code or password. Please check your credentials and try again.",
   inactive_account:
     "Your account is inactive. Please contact HR for assistance.",
   system_error:
@@ -6564,7 +6583,7 @@ function LoginPage() {
 
   function validate() {
     const errors: { employeeId?: string; password?: string } = {};
-    if (!employeeId.trim()) errors.employeeId = "Employee ID is required.";
+    if (!employeeId.trim()) errors.employeeId = "Employee Code is required.";
     if (!password) errors.password = "Password is required.";
     return errors;
   }
@@ -6673,9 +6692,9 @@ function LoginPage() {
           <form onSubmit={handleSubmit} noValidate>
             <div className="flex flex-col gap-5">
               <Input
-                label="Employee ID"
+                label="Employee Code"
                 type="text"
-                placeholder="e.g. EMP-00125"
+                placeholder="e.g. ansary34"
                 value={employeeId}
                 onChange={(e) => {
                   setEmployeeId(e.target.value);
