@@ -370,6 +370,20 @@ export function stageLabel(request: RequestRecord): string {
   return `Stage ${step.stage} of ${request.approvals.length} — ${step.title}`;
 }
 
+/**
+ * True only while the request still belongs to this employee and is sitting
+ * at stage 1 of its own chain — the Direct Manager, snapshotted at submission
+ * (buildApprovalChain always resolves the requester's direct manager first).
+ * Once stage 1 has been decided, `currentStep` moves to stage 2 or the
+ * request closes, so this turns false the moment the Direct Manager acts —
+ * before it ever reaches the Technical Manager or GM.
+ */
+export function canEmployeeDeleteRequest(request: RequestRecord, employeeId: string): boolean {
+  if (request.employeeId !== employeeId) return false;
+  if (request.status !== "PENDING") return false;
+  return currentStep(request)?.stage === 1;
+}
+
 export interface RequestRecord {
   id: string;
   requestNumber: string;

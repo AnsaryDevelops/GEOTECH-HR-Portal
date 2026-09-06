@@ -31,12 +31,14 @@ import {
   awaitsDecisionBy,
   involvesApprover,
   stageLabel,
+  canEmployeeDeleteRequest,
   isApprover,
   ROLE_LABEL,
   BALANCE_LABEL,
   DEFAULT_ENTITLEMENTS,
   DEFAULT_PERMISSION_MINUTES,
   PERMISSION_LABEL,
+  WEEKEND_DAYS,
   WORKDAY_START,
   WORKDAY_END,
   countWorkingDays,
@@ -1274,7 +1276,7 @@ const NAV_ITEMS: Record<
   ],
   TECH_MANAGER: [
     { label: "Dashboard", icon: Home, id: "dashboard" },
-    { label: "My Team", icon: Users, id: "team" },
+    { label: "My Teams", icon: Users, id: "team" },
     { label: "My Requests", icon: Umbrella, id: "myrequests" },
     { label: "Requests", icon: FileText, id: "requests" },
     { label: "Organization", icon: Briefcase, id: "organization" },
@@ -1585,6 +1587,8 @@ interface CreateEmployeeInput {
   position: string; department: string; role: UserRole;
   managerId: string | null; status: "ACTIVE" | "INACTIVE"; password: string;
   annualDays: number; casualDays: number; permissionMinutes: number;
+  /** Only applied when role is MANAGER — see createEmployee. */
+  teamMemberIds?: string[];
 }
 
 interface StoreContextValue {
@@ -1604,7 +1608,11 @@ interface StoreContextValue {
   ) => { ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> };
   approveRequest: (requestId: string, approverId: string, comment?: string) => { ok: boolean; error?: string };
   rejectRequest: (requestId: string, approverId: string, comment: string) => { ok: boolean; error?: string };
+  // employeeId must come from the caller's own session, never from a
+  // client-editable field on the request — see canEmployeeDeleteRequest.
+  deleteRequest: (requestId: string, employeeId: string) => { ok: boolean; error?: string };
   markNotificationRead: (id: string) => void;
+  markAllNotificationsRead: (userId: string) => void;
   // HR-only operations
   createEmployee: (
     data: CreateEmployeeInput
@@ -1983,8 +1991,50 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return decideRequest(requestId, approverId, "REJECTED", comment);
   }
 
+  // employeeId is always the caller's own session id (see call site), never a
+  // value read off the request or supplied by a form — canEmployeeDeleteRequest
+  // re-derives ownership and stage from the request itself, so a request
+  // cannot be deleted by guessing another employee's id or another request's id.
+  function deleteRequest(requestId: string, employeeId: string) {
+    const req = store.requests.find((r) => r.id === requestId);
+    if (!req) return { ok: false, error: "Request not found." };
+    if (!canEmployeeDeleteRequest(req, employeeId)) {
+      return {
+        ok: false,
+        error: req.employeeId !== employeeId
+          ? "You can only delete your own requests."
+          : "This request can no longer be deleted — your Direct Manager has already acted on it.",
+      };
+    }
+
+    mutate((prev) => {
+      const target = prev.requests.find((r) => r.id === requestId);
+      if (!target || !canEmployeeDeleteRequest(target, employeeId)) return prev;
+
+      return {
+        ...prev,
+        requests: prev.requests.filter((r) => r.id !== requestId),
+        // The manager's "awaiting your approval" notification (and any other
+        // notification about this request) would otherwise point at nothing.
+        notifications: prev.notifications.filter((n) => n.requestId !== requestId),
+      };
+    });
+
+    return { ok: true };
+  }
+
   function markNotificationRead(id: string) {
     mutate((p) => ({ ...p, notifications: p.notifications.map((n) => n.id === id ? { ...n, read: true } : n) }));
+  }
+
+  // Only ever called with the caller's own session id (see call sites) — this
+  // touches notifications for that one userId and leaves every other user's
+  // notifications untouched, same isolation rule as markNotificationRead.
+  function markAllNotificationsRead(userId: string) {
+    mutate((p) => ({
+      ...p,
+      notifications: p.notifications.map((n) => (n.userId === userId ? { ...n, read: true } : n)),
+    }));
   }
 
   function createEmployee(data: CreateEmployeeInput) {
@@ -2004,7 +2054,28 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       permissionMinutesPerMonth: data.permissionMinutes,
     };
     createHRUserCredential({ employeeNumber: id, name, role: data.role, password: data.password });
-    mutate((p) => ({ ...p, employees: [...p.employees, employee], nextEmpSeq: p.nextEmpSeq + 1 }));
+
+    // Team assignment only ever applies to a newly created Direct Manager, and
+    // only to employees who are still unmanaged at the moment of creation —
+    // this never silently reassigns someone who already reports to another
+    // manager, and never trusts the client-selected list without re-checking
+    // it against the current data here. Both the new employee and every team
+    // reassignment land in this one mutate() call, so there is no state where
+    // the manager exists but the team does not, or the reverse.
+    const teamIds = new Set(data.role === "MANAGER" ? data.teamMemberIds ?? [] : []);
+
+    mutate((p) => ({
+      ...p,
+      employees: [
+        ...p.employees.map((e) =>
+          teamIds.has(e.id) && e.role === "EMPLOYEE" && e.status === "ACTIVE" && !e.managerId
+            ? { ...e, managerId: id }
+            : e
+        ),
+        employee,
+      ],
+      nextEmpSeq: p.nextEmpSeq + 1,
+    }));
     return { ok: true as const, employee, password: data.password };
   }
 
@@ -2061,7 +2132,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       attendance: store.attendance, holidays: store.holidays,
       createLeaveRequest, createMissionRequest, createPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
-      approveRequest, rejectRequest, markNotificationRead,
+      approveRequest, rejectRequest, deleteRequest, markNotificationRead, markAllNotificationsRead,
       createEmployee, updateEmployee, createLeaveType, updateLeaveType,
     }}>
       {children}
@@ -2297,6 +2368,84 @@ function requestTypeLabel(r: RequestRecord): string {
   return "Mission";
 }
 
+/** "09:00" plus/minus N minutes, wrapped to a 24h clock — e.g. "10:00". */
+function addMinutesToClock(time: string, minutes: number): string {
+  const total = minutesOfDay(time) + minutes;
+  const wrapped = ((total % 1440) + 1440) % 1440;
+  const h = Math.floor(wrapped / 60);
+  const m = wrapped % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+/**
+ * The actual clock window a Permission covers. The model stores only
+ * permissionKind + permissionMinutes (a duration), not separate start/end
+ * times, so this derives them from the fixed workday bounds — the same
+ * numbers lateMinutes()/earlyLeaveMinutes() are computed against.
+ */
+function permissionWindow(r: RequestRecord): { start: string; end: string } | null {
+  if (r.type !== "PERMISSION" || !r.permissionKind || r.permissionMinutes == null) return null;
+  return r.permissionKind === "LATE_ARRIVAL"
+    ? { start: WORKDAY_START, end: addMinutesToClock(WORKDAY_START, r.permissionMinutes) }
+    : { start: addMinutesToClock(WORKDAY_END, -r.permissionMinutes), end: WORKDAY_END };
+}
+
+/** Minutes between a Mission's start and end date/time, when both are set. */
+function missionDurationMinutes(r: RequestRecord): number | null {
+  if (r.type !== "MISSION" || !r.startDate || !r.startTime || !r.endDate || !r.endTime) return null;
+  const start = new Date(`${r.startDate}T${r.startTime}`);
+  const end = new Date(`${r.endDate}T${r.endTime}`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+  return Math.round((end.getTime() - start.getTime()) / 60000);
+}
+
+/**
+ * The fields specific to this request's type, for a dedicated "Request
+ * Details" section — Leave, Mission and Permission each submit different
+ * information, so they are not forced into one shared field list. Every value
+ * here already exists on RequestRecord (or, for a Permission's clock times, is
+ * derived from fields that do); nothing new is stored.
+ */
+function requestTypeDetailFields(r: RequestRecord): { label: string; value: string }[] {
+  if (r.type === "LEAVE") {
+    return [
+      { label: "Leave Type", value: r.leaveType ?? "—" },
+      { label: "Start Date", value: fmtDate(r.startDate) },
+      { label: "End Date", value: fmtDate(r.endDate) },
+      ...(r.workingDays != null
+        ? [{ label: "Working Days", value: `${r.workingDays} ${r.workingDays === 1 ? "day" : "days"}` }]
+        : []),
+      { label: "Reason", value: r.reason?.trim() ? r.reason : "—" },
+    ];
+  }
+
+  if (r.type === "MISSION") {
+    const duration = missionDurationMinutes(r);
+    return [
+      { label: "Start Date", value: fmtDate(r.startDate) },
+      { label: "Start Time", value: r.startTime ?? "—" },
+      { label: "End Date", value: fmtDate(r.endDate) },
+      { label: "End Time", value: r.endTime ?? "—" },
+      { label: "Location", value: r.location ?? "—" },
+      { label: "Purpose", value: r.purpose?.trim() ? r.purpose : "—" },
+      ...(duration != null ? [{ label: "Duration", value: formatMinutes(duration) }] : []),
+    ];
+  }
+
+  // PERMISSION — a same-day request, so Start Date and End Date are the same
+  // stored date; only the derived clock time differs between the two ends.
+  const window = permissionWindow(r);
+  return [
+    { label: "Permission Type", value: r.permissionKind ? PERMISSION_LABEL[r.permissionKind] : "—" },
+    { label: "Start Date", value: fmtDate(r.startDate) },
+    { label: "Start Time", value: window?.start ?? "—" },
+    { label: "End Date", value: fmtDate(r.startDate) },
+    { label: "End Time", value: window?.end ?? "—" },
+    ...(r.permissionMinutes != null ? [{ label: "Duration", value: formatMinutes(r.permissionMinutes) }] : []),
+    { label: "Reason", value: r.reason?.trim() ? r.reason : "—" },
+  ];
+}
+
 const STATUS_BADGE: Record<"PENDING" | "APPROVED" | "REJECTED", BadgeVariant> = {
   PENDING: "pending",
   APPROVED: "approved",
@@ -2475,6 +2624,48 @@ function LeaveBalanceCard({ balance }: { balance: LeaveBalance }) {
   );
 }
 
+/**
+ * Compact summary shown above the Leave Type field on the leave request form.
+ * `balance` is the employee's existing ANNUAL LeaveBalance from getLeaveBalance()
+ * — the same figure LeaveBalanceCard shows elsewhere — so the current unsaved
+ * form never affects it. `requestedDays` is countWorkingDays() over the dates
+ * currently typed into the form, kept entirely separate from the balance.
+ */
+function LeaveRequestBalanceSummary({
+  balance,
+  requestedDays,
+}: {
+  balance: LeaveBalance | null;
+  requestedDays: number;
+}) {
+  if (!balance) return null;
+  return (
+    <div className="rounded-[8px] border border-border bg-muted/30 p-4">
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+        Leave Balance
+      </p>
+      <div className="flex flex-col sm:flex-row sm:items-baseline gap-3 sm:gap-0 sm:divide-x sm:divide-border">
+        <div className="flex items-baseline gap-1.5 sm:pr-5">
+          <span className="text-2xl font-semibold tabular-nums text-foreground">
+            {balance.available}
+          </span>
+          <span className="text-sm text-muted-foreground">
+            {balance.available === 1 ? "Day" : "Days"} remaining of {balance.entitlement} days allocated
+          </span>
+        </div>
+        <div className="flex items-baseline gap-1.5 sm:pl-5">
+          <span className="text-2xl font-semibold tabular-nums text-foreground">
+            {requestedDays}
+          </span>
+          <span className="text-sm text-muted-foreground">
+            {requestedDays === 1 ? "Day" : "Days"} on leave requested
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** The small always-on chip. Sits in the shell header on every screen. */
 function PermissionChip() {
   const { permission } = useMyBalances();
@@ -2501,6 +2692,119 @@ function PermissionChip() {
       <span className="tabular-nums">{formatMinutes(permission.available)}</span>
       <span className="text-[10px] opacity-70">left</span>
     </button>
+  );
+}
+
+type CalendarDayState = "LEAVE" | "HOLIDAY" | "PRESENT" | "WEEKEND" | "NORMAL";
+
+const CALENDAR_DAY_STYLES: Record<CalendarDayState, string> = {
+  LEAVE: "bg-blue-50 text-blue-700",
+  HOLIDAY: "bg-amber-50 text-amber-700",
+  PRESENT: "bg-green-50 text-green-700",
+  WEEKEND: "text-muted-foreground/50",
+  NORMAL: "text-foreground",
+};
+
+const CALENDAR_LEGEND: { state: CalendarDayState; label: string; dot: string }[] = [
+  { state: "PRESENT", label: "Present", dot: "bg-green-500" },
+  { state: "LEAVE", label: "Annual Leave", dot: "bg-blue-500" },
+  { state: "HOLIDAY", label: "Public Holiday", dot: "bg-amber-500" },
+];
+
+/**
+ * Small current-month snapshot for the signed-in employee's own dashboard.
+ * Reuses existing data only: AttendanceRecord for Present, approved LEAVE
+ * requests with balanceKey "ANNUAL" (the same bucket getLeaveBalance already
+ * uses) for Annual Leave, and the existing HolidayRecord list. No new data
+ * model, no per-day storage — every cell's state is derived on the fly.
+ *
+ * Precedence when more than one applies to the same date: Annual Leave, then
+ * Public Holiday, then Present, then the Friday/Saturday weekend (muted) —
+ * matching the order given in the spec. A weekend day inside an approved
+ * leave's own date range still reads as leave, since the leave genuinely
+ * covers it; countWorkingDays (used for balance math) already excludes
+ * weekends from what that leave *consumes*, which this display doesn't change.
+ */
+function MyCalendarWidget() {
+  const { session } = useAuth();
+  const { requests, attendance, holidays } = useStore();
+
+  const employeeId = session!.user.id;
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const todayStr = toISODate(now);
+  const monthLabel = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+
+  const approvedAnnualLeave = requests.filter(
+    (r): r is RequestRecord & { startDate: string; endDate: string } =>
+      r.employeeId === employeeId &&
+      r.type === "LEAVE" &&
+      r.status === "APPROVED" &&
+      r.balanceKey === "ANNUAL" &&
+      !!r.startDate &&
+      !!r.endDate
+  );
+
+  function dayState(dateStr: string, weekday: number): CalendarDayState {
+    if (approvedAnnualLeave.some((r) => dateStr >= r.startDate && dateStr <= r.endDate)) return "LEAVE";
+    if (holidays.some((h) => h.date === dateStr)) return "HOLIDAY";
+    const record = attendance.find((a) => a.employeeId === employeeId && a.date === dateStr);
+    if (record?.checkIn && record?.checkOut) return "PRESENT";
+    if (WEEKEND_DAYS.includes(weekday)) return "WEEKEND";
+    return "NORMAL";
+  }
+
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+
+  return (
+    <div className="rounded-[12px] border border-border bg-card p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-foreground">My Calendar</h3>
+        <p className="text-xs text-muted-foreground">{monthLabel}</p>
+      </div>
+
+      <div className="grid grid-cols-7 gap-y-1 text-center">
+        {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
+          <div key={d} className="text-[10px] font-medium text-muted-foreground/70 pb-1">
+            {d}
+          </div>
+        ))}
+        {Array.from({ length: firstWeekday }, (_, i) => (
+          <div key={`blank-${i}`} />
+        ))}
+        {days.map((day) => {
+          const dateStr = toISODate(new Date(year, month, day));
+          const weekday = new Date(year, month, day).getDay();
+          const state = dayState(dateStr, weekday);
+          const isToday = dateStr === todayStr;
+          return (
+            <div key={dateStr} className="flex items-center justify-center py-0.5">
+              <span
+                className={cn(
+                  "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums",
+                  CALENDAR_DAY_STYLES[state],
+                  isToday && "ring-1 ring-primary font-semibold"
+                )}
+              >
+                {day}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-3 pt-3 border-t border-border">
+        {CALENDAR_LEGEND.map(({ state, label, dot }) => (
+          <div key={state} className="flex items-center gap-1.5">
+            <span className={cn("h-2 w-2 rounded-full flex-shrink-0", dot)} aria-hidden="true" />
+            <span className="text-[11px] text-muted-foreground">{label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -2593,54 +2897,58 @@ function EmployeeDashboardPage() {
         ))}
       </div>
 
-      {/* Recent requests */}
-      <Card>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-foreground">Recent Requests</h3>
-          {myRequests.length > 0 && (
-            <button
-              className="text-xs text-primary hover:underline"
-              onClick={() => navigate("/employee/requests")}
-            >
-              View all
-            </button>
-          )}
-        </div>
-        {recent.length === 0 ? (
-          <EmptyState
-            icon={<FileText className="h-8 w-8 text-muted-foreground/40" />}
-            title="No requests yet"
-            description="Click New Request above to submit your first request."
-          />
-        ) : (
-          <div className="flex flex-col divide-y divide-border">
-            {recent.map((r) => (
+      {/* Recent requests + calendar snapshot */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        <Card className="lg:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-foreground">Recent Requests</h3>
+            {myRequests.length > 0 && (
               <button
-                key={r.id}
-                className="flex items-center gap-4 py-3 text-left hover:bg-muted/40 -mx-2 px-2 rounded-[6px] transition-colors"
-                onClick={() => navigate(`/employee/requests/${r.id}`)}
+                className="text-xs text-primary hover:underline"
+                onClick={() => navigate("/employee/requests")}
               >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-muted-foreground">{r.requestNumber}</span>
-                    <span className="text-xs text-muted-foreground">·</span>
-                    <span className="text-xs text-muted-foreground">
-                      {requestLabel(r)}
-                    </span>
-                  </div>
-                  <p className="text-sm text-foreground mt-0.5 truncate">
-                    {requestPeriod(r)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3 flex-shrink-0">
-                  <StatusBadge status={STATUS_BADGE[r.status]} />
-                  <ChevronRight className="h-4 w-4 text-muted-foreground/40" />
-                </div>
+                View all
               </button>
-            ))}
+            )}
           </div>
-        )}
-      </Card>
+          {recent.length === 0 ? (
+            <EmptyState
+              icon={<FileText className="h-8 w-8 text-muted-foreground/40" />}
+              title="No requests yet"
+              description="Click New Request above to submit your first request."
+            />
+          ) : (
+            <div className="flex flex-col divide-y divide-border">
+              {recent.map((r) => (
+                <button
+                  key={r.id}
+                  className="flex items-center gap-4 py-3 text-left hover:bg-muted/40 -mx-2 px-2 rounded-[6px] transition-colors"
+                  onClick={() => navigate(`/employee/requests/${r.id}`)}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-muted-foreground">{r.requestNumber}</span>
+                      <span className="text-xs text-muted-foreground">·</span>
+                      <span className="text-xs text-muted-foreground">
+                        {requestLabel(r)}
+                      </span>
+                    </div>
+                    <p className="text-sm text-foreground mt-0.5 truncate">
+                      {requestPeriod(r)}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    <StatusBadge status={STATUS_BADGE[r.status]} />
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/40" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <MyCalendarWidget />
+      </div>
     </DashboardShell>
   );
 }
@@ -2724,7 +3032,7 @@ function NewRequestPage() {
 function LeaveRequestPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
-  const { requests, leaveTypes, employees, createLeaveRequest } = useStore();
+  const { requests, leaveTypes, employees, holidays, createLeaveRequest } = useStore();
   const navigate = useNavigate();
 
   const manager = getManagerForEmployee(employees, session!.user.id);
@@ -2736,6 +3044,13 @@ function LeaveRequestPage() {
   const [reason, setReason] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+
+  // Same ANNUAL balance shown elsewhere (getLeaveBalance) — never adjusted by
+  // the current, unsaved form. requestedDays is a separate, live figure from
+  // the existing countWorkingDays(), computed from whatever dates are typed in.
+  const me = employees.find((e) => e.id === session!.user.id) ?? null;
+  const annualBalance = me ? getLeaveBalance(me, requests, "ANNUAL") : null;
+  const requestedDays = countWorkingDays(startDate, endDate, holidays);
 
   function clearErr(field: string) {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
@@ -2803,6 +3118,7 @@ function LeaveRequestPage() {
           )}
           <form onSubmit={handleSubmit} noValidate>
             <div className="flex flex-col gap-5">
+              <LeaveRequestBalanceSummary balance={annualBalance} requestedDays={requestedDays} />
               <Select
                 label="Leave Type *"
                 value={leaveType}
@@ -3177,9 +3493,13 @@ function EmployeeRequestDetailPage() {
   const selfNavId = useSelfServiceNavId();
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
-  const { requests } = useStore();
+  const { requests, deleteRequest } = useStore();
   const { session } = useAuth();
   const navigate = useNavigate();
+
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteErr, setDeleteErr] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   const justSubmitted = location.state?.justSubmitted === true;
   const request = requests.find((r) => r.id === id);
@@ -3192,6 +3512,22 @@ function EmployeeRequestDetailPage() {
   // equivalent check; this page did not.
   if (request.employeeId !== session!.user.id) {
     return <Navigate to="/access-denied" replace />;
+  }
+
+  // Same rule deleteRequest() re-checks server-side (i.e. inside the store
+  // mutation itself) — this only controls whether the button is offered.
+  const deletable = canEmployeeDeleteRequest(request, session!.user.id);
+
+  async function handleDelete() {
+    setDeleting(true);
+    await new Promise((r) => setTimeout(r, 500));
+    const res = deleteRequest(request!.id, session!.user.id);
+    if (!res.ok) {
+      setDeleteErr(res.error ?? "This request could not be deleted.");
+      setDeleting(false);
+      return;
+    }
+    navigate("/employee/requests", { replace: true, state: { justDeleted: true } });
   }
 
   return (
@@ -3301,6 +3637,13 @@ function EmployeeRequestDetailPage() {
                 </div>
               </div>
             )}
+            {deletable && (
+              <div className="mt-5 pt-5 border-t border-border">
+                <Button variant="destructive" onClick={() => setShowDeleteModal(true)}>
+                  Delete Request
+                </Button>
+              </div>
+            )}
           </Card>
 
           <div className="flex flex-col gap-4">
@@ -3320,6 +3663,37 @@ function EmployeeRequestDetailPage() {
           </div>
         </div>
       </div>
+
+      <Modal
+        open={showDeleteModal}
+        onClose={() => { setShowDeleteModal(false); setDeleteErr(""); }}
+        title="Delete request?"
+        size="sm"
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to delete request {request.requestNumber}?
+            This action cannot be undone.
+          </p>
+          {deleteErr && (
+            <Alert variant="error">
+              <p className="text-sm text-red-800">{deleteErr}</p>
+            </Alert>
+          )}
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => { setShowDeleteModal(false); setDeleteErr(""); }}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} loading={deleting}>
+              Delete Request
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </DashboardShell>
   );
 }
@@ -3333,6 +3707,9 @@ function EmployeeRequestsPage() {
   const { session } = useAuth();
   const { requests } = useStore();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  const justDeleted = location.state?.justDeleted === true;
 
   const myRequests = [...requests.filter((r) => r.employeeId === session!.user.id)].sort(
     (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
@@ -3340,6 +3717,14 @@ function EmployeeRequestsPage() {
 
   return (
     <DashboardShell activeNavId={selfNavId} pageTitle="My Requests">
+      {justDeleted && (
+        <Alert variant="success" className="mb-5">
+          <p className="font-medium text-green-800 text-sm">Request deleted</p>
+          <p className="text-sm text-green-700 mt-0.5">
+            Your request has been removed.
+          </p>
+        </Alert>
+      )}
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-lg font-semibold text-foreground">My Requests</h2>
         <Button variant="primary" onClick={() => navigate("/employee/new-request")}>
@@ -3415,12 +3800,13 @@ function EmployeeRequestsPage() {
 
 function EmployeeNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead } = useStore();
+  const { notifications, markNotificationRead, markAllNotificationsRead } = useStore();
   const navigate = useNavigate();
 
   const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
+  const hasUnread = myNotifs.some((n) => !n.read);
 
   function handleClick(n: NotificationRecord) {
     markNotificationRead(n.id);
@@ -3430,7 +3816,18 @@ function EmployeeNotificationsPage() {
   return (
     <DashboardShell activeNavId="notifications" pageTitle="Notifications">
       <div className="max-w-2xl">
-        <h2 className="text-lg font-semibold text-foreground mb-5">Notifications</h2>
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
+          {myNotifs.length > 0 && (
+            <button
+              onClick={() => markAllNotificationsRead(session!.user.id)}
+              disabled={!hasUnread}
+              className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
+            >
+              Mark all as read
+            </button>
+          )}
+        </div>
         {myNotifs.length === 0 ? (
           <Card>
             <EmptyState
@@ -3523,46 +3920,50 @@ function ManagerDashboardPage() {
         ))}
       </div>
 
-      <Card>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-foreground">Pending Requests</h3>
-          {myRequests.length > 0 && (
-            <button className="text-xs text-primary hover:underline" onClick={() => navigate("/manager/requests")}>
-              View all
-            </button>
-          )}
-        </div>
-        {recentPending.length === 0 ? (
-          <EmptyState
-            icon={<CheckCircle2 className="h-8 w-8 text-muted-foreground/40" />}
-            title="No pending requests"
-            description="New requests from your team will appear here."
-          />
-        ) : (
-          <div className="flex flex-col divide-y divide-border">
-            {recentPending.map((r) => (
-              <button
-                key={r.id}
-                className="flex items-center gap-4 py-3 text-left hover:bg-muted/40 -mx-2 px-2 rounded-[6px] transition-colors"
-                onClick={() => navigate(`/manager/requests/${r.id}`)}
-              >
-                <Avatar name={r.employeeName} size="sm" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-foreground">{r.employeeName}</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {requestLabel(r)} ·{" "}
-                    {requestPeriod(r)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <StatusBadge status="pending" />
-                  <ChevronRight className="h-4 w-4 text-muted-foreground/40" />
-                </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        <Card className="lg:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-foreground">Pending Requests</h3>
+            {myRequests.length > 0 && (
+              <button className="text-xs text-primary hover:underline" onClick={() => navigate("/manager/requests")}>
+                View all
               </button>
-            ))}
+            )}
           </div>
-        )}
-      </Card>
+          {recentPending.length === 0 ? (
+            <EmptyState
+              icon={<CheckCircle2 className="h-8 w-8 text-muted-foreground/40" />}
+              title="No pending requests"
+              description="New requests from your team will appear here."
+            />
+          ) : (
+            <div className="flex flex-col divide-y divide-border">
+              {recentPending.map((r) => (
+                <button
+                  key={r.id}
+                  className="flex items-center gap-4 py-3 text-left hover:bg-muted/40 -mx-2 px-2 rounded-[6px] transition-colors"
+                  onClick={() => navigate(`/manager/requests/${r.id}`)}
+                >
+                  <Avatar name={r.employeeName} size="sm" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-foreground">{r.employeeName}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {requestLabel(r)} ·{" "}
+                      {requestPeriod(r)}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <StatusBadge status="pending" />
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/40" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <MyCalendarWidget />
+      </div>
     </DashboardShell>
   );
 }
@@ -3630,6 +4031,11 @@ function ManagerTeamPage() {
   // on the spinner forever.
   const [retry, setRetry] = useState(0);
 
+  // Label only — the Technical Manager oversees several department managers'
+  // teams at once, so the plural reads more accurately there. Functionality
+  // (still just this approver's own direct reports) is unchanged for everyone.
+  const pageLabel = session!.user.role === "TECH_MANAGER" ? "My Teams" : "My Team";
+
   useEffect(() => {
     setLoadState("loading");
     const timer = setTimeout(() => {
@@ -3647,7 +4053,7 @@ function ManagerTeamPage() {
 
   if (loadState === "loading") {
     return (
-      <DashboardShell activeNavId="team" pageTitle="My Team">
+      <DashboardShell activeNavId="team" pageTitle={pageLabel}>
         <LoadingState message="Loading your team..." />
       </DashboardShell>
     );
@@ -3655,7 +4061,7 @@ function ManagerTeamPage() {
 
   if (loadState === "error") {
     return (
-      <DashboardShell activeNavId="team" pageTitle="My Team">
+      <DashboardShell activeNavId="team" pageTitle={pageLabel}>
         <ErrorState
           message="Something went wrong. We couldn't load your team."
           onRetry={() => setRetry((n) => n + 1)}
@@ -3675,10 +4081,10 @@ function ManagerTeamPage() {
     : team;
 
   return (
-    <DashboardShell activeNavId="team" pageTitle="My Team">
+    <DashboardShell activeNavId="team" pageTitle={pageLabel}>
       {/* Page header */}
       <div className="mb-6">
-        <h2 className="text-lg font-semibold text-foreground">My Team</h2>
+        <h2 className="text-lg font-semibold text-foreground">{pageLabel}</h2>
         <p className="text-sm text-muted-foreground mt-1">
           Employees who report directly to you.
         </p>
@@ -3800,44 +4206,125 @@ function ManagerTeamPage() {
 // activate or role controls: changing people stays with HR.
 
 function OrganizationPage() {
-  const { employees } = useStore();
-  const [search, setSearch] = useState("");
+  const { employees, requests } = useStore();
+  const [filterEmployee, setFilterEmployee] = useState("");
+  const [filterManager, setFilterManager] = useState("");
+  const [filterType, setFilterType] = useState<"" | "LEAVE" | "MISSION" | "PERMISSION">("");
   const [selected, setSelected] = useState<EmployeeProfile | null>(null);
-
-  const q = search.toLowerCase().trim();
-  const rows = employees.filter(
-    (e) =>
-      !q ||
-      e.name.toLowerCase().includes(q) ||
-      e.id.toLowerCase().includes(q) ||
-      e.department.toLowerCase().includes(q)
-  );
 
   const managerName = (e: EmployeeProfile) =>
     employees.find((m) => m.id === e.managerId)?.name ?? "—";
 
+  // Same options pattern as the Requests filter bar: unique names, sorted.
+  const employeeOptions = Array.from(new Set(employees.map((e) => e.name))).sort();
+  // Manager filter: the employee's Direct Manager (managerId), not an
+  // approval-stage/current-approver concept.
+  const managerOptions = Array.from(
+    new Set(employees.map((e) => managerName(e)).filter((name) => name !== "—"))
+  ).sort();
+
+  const hasFilters = !!(filterEmployee || filterManager || filterType);
+
+  function clearFilters() {
+    setFilterEmployee("");
+    setFilterManager("");
+    setFilterType("");
+  }
+
+  // An employee has no "type" field of their own — Leave/Mission/Permission
+  // is a property of a request. So the Type filter matches employees who have
+  // at least one request of the selected type, using the existing requests
+  // data rather than inventing a new employee-level field.
+  const rows = employees.filter((e) => {
+    if (filterEmployee && e.name !== filterEmployee) return false;
+    if (filterManager && managerName(e) !== filterManager) return false;
+    if (filterType && !requests.some((r) => r.employeeId === e.id && r.type === filterType)) return false;
+    return true;
+  });
+
   return (
     <DashboardShell activeNavId="organization" pageTitle="Organization">
-      <div className="mb-5">
-        <h2 className="text-lg font-semibold text-foreground">Organization</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Everyone in the company, with their place in the reporting chain. View only.
-        </p>
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h2 className="text-lg font-semibold text-foreground">Organization</h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            Everyone in the company, with their place in the reporting chain. View only.
+          </p>
+        </div>
+        {hasFilters && (
+          <p className="text-xs text-muted-foreground">
+            Showing {rows.length} of {employees.length}
+          </p>
+        )}
       </div>
 
-      <div className="relative mb-4 max-w-sm">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-        <input
-          className="w-full pl-9 pr-3 py-2 rounded-[8px] border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-          placeholder="Search by name, ID or department..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      {/* Filter bar — same pattern as the Requests filter bar, minus the date range */}
+      <div className="rounded-[12px] border border-border bg-card shadow-sm p-4 mb-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <Select
+            label="Employee"
+            value={filterEmployee}
+            onChange={(e) => setFilterEmployee(e.target.value)}
+          >
+            <option value="">All Employees</option>
+            {employeeOptions.map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </Select>
+
+          <Select
+            label="Manager"
+            value={filterManager}
+            onChange={(e) => setFilterManager(e.target.value)}
+          >
+            <option value="">All Managers</option>
+            {managerOptions.map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </Select>
+
+          <Select
+            label="Type"
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value as "" | "LEAVE" | "MISSION" | "PERMISSION")}
+          >
+            <option value="">All Types</option>
+            <option value="LEAVE">Leave</option>
+            <option value="MISSION">Mission</option>
+            <option value="PERMISSION">Permission</option>
+          </Select>
+        </div>
+
+        {hasFilters && (
+          <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">
+              {rows.length === employees.length
+                ? "Showing all employees"
+                : `${rows.length} of ${employees.length} employees match`}
+            </p>
+            <button
+              onClick={clearFilters}
+              className="flex items-center gap-1.5 text-xs text-primary hover:underline"
+            >
+              <X className="h-3 w-3" />
+              Clear filters
+            </button>
+          </div>
+        )}
       </div>
 
       <Card padding={false}>
         {rows.length === 0 ? (
-          <EmptyState title="No matches" description="Try a different name, ID or department." />
+          <EmptyState
+            icon={<Search className="h-8 w-8 text-muted-foreground/40" />}
+            title="No matching employees"
+            description="Try adjusting your filters to find what you're looking for."
+            action={
+              <Button variant="secondary" onClick={clearFilters}>
+                Clear Filters
+              </Button>
+            }
+          />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -3894,20 +4381,33 @@ function ManagerRequestsPage() {
   const navigate = useNavigate();
 
   const [filterEmployee, setFilterEmployee] = useState("");
+  const [filterManager, setFilterManager] = useState("");
   const [filterType, setFilterType] = useState<"" | "LEAVE" | "MISSION">("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
+
+  // The Technical Manager and GM both see requests across every department
+  // (they appear in nearly every chain), so filtering by the requester's
+  // Direct Manager is useful there. A department Manager's own accessible
+  // requests already share a single Direct Manager — themselves — so the
+  // filter would offer exactly one, always-selected option and is skipped.
+  const showManagerFilter = session!.user.role === "TECH_MANAGER" || session!.user.role === "GM";
 
   const myRequests = [...requests.filter((r) => involvesApprover(r, session!.user.id))].sort(
     (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
   );
 
   const employeeOptions = Array.from(new Set(myRequests.map((r) => r.employeeName))).sort();
+  // managerName is the request's stage-1 approver — the requester's Direct
+  // Manager, snapshotted at submission — not an approval-stage/current-approver
+  // concept, per RequestRecord's own "Kept for display and filters" comment.
+  const managerOptions = Array.from(new Set(myRequests.map((r) => r.managerName))).sort();
 
-  const hasFilters = !!(filterEmployee || filterType || filterDateFrom || filterDateTo);
+  const hasFilters = !!(filterEmployee || filterManager || filterType || filterDateFrom || filterDateTo);
 
   function clearFilters() {
     setFilterEmployee("");
+    setFilterManager("");
     setFilterType("");
     setFilterDateFrom("");
     setFilterDateTo("");
@@ -3915,6 +4415,7 @@ function ManagerRequestsPage() {
 
   const filtered = myRequests.filter((r) => {
     if (filterEmployee && r.employeeName !== filterEmployee) return false;
+    if (filterManager && r.managerName !== filterManager) return false;
     if (filterType && r.type !== filterType) return false;
     // Date range filters against the request's start date
     if (filterDateFrom && r.startDate && r.startDate < filterDateFrom) return false;
@@ -3984,7 +4485,10 @@ function ManagerRequestsPage() {
       {/* Filter bar — only shown when there are requests to filter */}
       {myRequests.length > 0 && (
         <div className="rounded-[12px] border border-border bg-card shadow-sm p-4 mb-5">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className={cn(
+            "grid grid-cols-1 sm:grid-cols-2 gap-3",
+            showManagerFilter ? "lg:grid-cols-5" : "lg:grid-cols-4"
+          )}>
             <Select
               label="Employee"
               value={filterEmployee}
@@ -3995,6 +4499,19 @@ function ManagerRequestsPage() {
                 <option key={name} value={name}>{name}</option>
               ))}
             </Select>
+
+            {showManagerFilter && (
+              <Select
+                label="Manager"
+                value={filterManager}
+                onChange={(e) => setFilterManager(e.target.value)}
+              >
+                <option value="">All Managers</option>
+                {managerOptions.map((name) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </Select>
+            )}
 
             <Select
               label="Type"
@@ -4301,12 +4818,13 @@ function ManagerRequestDetailPage() {
 
 function ManagerNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead } = useStore();
+  const { notifications, markNotificationRead, markAllNotificationsRead } = useStore();
   const navigate = useNavigate();
 
   const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
+  const hasUnread = myNotifs.some((n) => !n.read);
 
   function handleClick(n: NotificationRecord) {
     markNotificationRead(n.id);
@@ -4316,7 +4834,18 @@ function ManagerNotificationsPage() {
   return (
     <DashboardShell activeNavId="notifications" pageTitle="Notifications">
       <div className="max-w-2xl">
-        <h2 className="text-lg font-semibold text-foreground mb-5">Notifications</h2>
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
+          {myNotifs.length > 0 && (
+            <button
+              onClick={() => markAllNotificationsRead(session!.user.id)}
+              disabled={!hasUnread}
+              className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
+            >
+              Mark all as read
+            </button>
+          )}
+        </div>
         {myNotifs.length === 0 ? (
           <Card>
             <EmptyState
@@ -4415,54 +4944,58 @@ function HRDashboardPage() {
       </div>
 
       {/* Recent requests */}
-      <Card>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-foreground">Recent Requests</h3>
-          {requests.length > 0 && (
-            <button className="text-xs text-primary hover:underline" onClick={() => navigate("/hr/requests")}>
-              View all
-            </button>
-          )}
-        </div>
-        {recent.length === 0 ? (
-          <EmptyState
-            icon={<FileText className="h-8 w-8 text-muted-foreground/40" />}
-            title="No requests yet"
-            description="Employee requests will appear here."
-          />
-        ) : (
-          <div className="overflow-x-auto -mx-6 px-6">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Request #", "Employee", "Type", "Period", "Manager", "Status", "Submitted"].map((h) => (
-                    <th key={h} className="text-left text-xs font-medium text-muted-foreground pb-2 pr-4 whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {recent.map((r) => (
-                  <tr
-                    key={r.id}
-                    className="hover:bg-muted/30 cursor-pointer transition-colors"
-                    onClick={() => navigate(`/hr/requests/${r.id}`)}
-                  >
-                    <td className="py-2.5 pr-4 font-mono text-xs text-muted-foreground">{r.requestNumber}</td>
-                    <td className="py-2.5 pr-4 font-medium">{r.employeeName}</td>
-                    <td className="py-2.5 pr-4 text-muted-foreground">{requestLabel(r)}</td>
-                    <td className="py-2.5 pr-4 text-muted-foreground whitespace-nowrap">
-                      {r.type === "MISSION" ? `${fmtDate(r.startDate)} ${r.startTime ?? ""}` : `${fmtDate(r.startDate)} – ${fmtDate(r.endDate)}`}
-                    </td>
-                    <td className="py-2.5 pr-4 text-muted-foreground">{r.managerName}</td>
-                    <td className="py-2.5 pr-4"><StatusBadge status={STATUS_BADGE[r.status]} /></td>
-                    <td className="py-2.5 text-muted-foreground whitespace-nowrap">{fmtDate(r.submittedAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        <Card className="lg:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-foreground">Recent Requests</h3>
+            {requests.length > 0 && (
+              <button className="text-xs text-primary hover:underline" onClick={() => navigate("/hr/requests")}>
+                View all
+              </button>
+            )}
           </div>
-        )}
-      </Card>
+          {recent.length === 0 ? (
+            <EmptyState
+              icon={<FileText className="h-8 w-8 text-muted-foreground/40" />}
+              title="No requests yet"
+              description="Employee requests will appear here."
+            />
+          ) : (
+            <div className="overflow-x-auto -mx-6 px-6">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    {["Request #", "Employee", "Type", "Period", "Manager", "Status", "Submitted"].map((h) => (
+                      <th key={h} className="text-left text-xs font-medium text-muted-foreground pb-2 pr-4 whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {recent.map((r) => (
+                    <tr
+                      key={r.id}
+                      className="hover:bg-muted/30 cursor-pointer transition-colors"
+                      onClick={() => navigate(`/hr/requests/${r.id}`)}
+                    >
+                      <td className="py-2.5 pr-4 font-mono text-xs text-muted-foreground">{r.requestNumber}</td>
+                      <td className="py-2.5 pr-4 font-medium">{r.employeeName}</td>
+                      <td className="py-2.5 pr-4 text-muted-foreground">{requestLabel(r)}</td>
+                      <td className="py-2.5 pr-4 text-muted-foreground whitespace-nowrap">
+                        {r.type === "MISSION" ? `${fmtDate(r.startDate)} ${r.startTime ?? ""}` : `${fmtDate(r.startDate)} – ${fmtDate(r.endDate)}`}
+                      </td>
+                      <td className="py-2.5 pr-4 text-muted-foreground">{r.managerName}</td>
+                      <td className="py-2.5 pr-4"><StatusBadge status={STATUS_BADGE[r.status]} /></td>
+                      <td className="py-2.5 text-muted-foreground whitespace-nowrap">{fmtDate(r.submittedAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        <MyCalendarWidget />
+      </div>
     </DashboardShell>
   );
 }
@@ -4476,17 +5009,120 @@ interface EmployeeFormData {
   annualDays: string;
   casualDays: string;
   permissionMinutes: string;
+  /** Add-only: who should report to this employee once created. Role MANAGER only. */
+  teamMemberIds: string[];
+}
+
+// Add-only: lets HR pick who should report to a new Direct Manager at
+// creation time. Reuses the existing managerId hierarchy as the only source
+// of truth — this never introduces a separate "team" structure, it just sets
+// managerId on the selected employees at submission (see createEmployee).
+function TeamMembersField({
+  candidates,
+  allEmployees,
+  selectedIds,
+  onChange,
+}: {
+  candidates: EmployeeProfile[];
+  allEmployees: EmployeeProfile[];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  function toggle(id: string, alreadyManaged: boolean) {
+    if (alreadyManaged) return;
+    onChange(
+      selectedIds.includes(id) ? selectedIds.filter((x) => x !== id) : [...selectedIds, id]
+    );
+  }
+
+  const selected = candidates.filter((e) => selectedIds.includes(e.id));
+
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="text-sm font-medium text-foreground">Team Members</label>
+      <p className="text-xs text-muted-foreground -mt-1">
+        Optional. Selected employees will report directly to this manager once the account is created.
+      </p>
+
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {selected.map((e) => (
+            <span
+              key={e.id}
+              className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 text-primary text-xs font-medium pl-2.5 pr-1.5 py-1"
+            >
+              {e.name}
+              <button
+                type="button"
+                onClick={() => toggle(e.id, false)}
+                className="hover:bg-primary/20 rounded-full p-0.5"
+                aria-label={`Remove ${e.name}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-[8px] border border-border max-h-56 overflow-y-auto divide-y divide-border">
+        {candidates.length === 0 ? (
+          <p className="text-sm text-muted-foreground p-3">No unassigned employees available.</p>
+        ) : (
+          candidates.map((e) => {
+            // Employees who already report to someone are shown, not hidden,
+            // so HR can see why — but are not selectable here. HR already has
+            // a dedicated, explicit reassignment path (Edit Employee); this
+            // bulk picker never silently moves someone off their current manager.
+            const alreadyManaged = !!e.managerId;
+            const currentManagerName = alreadyManaged
+              ? allEmployees.find((m) => m.id === e.managerId)?.name ?? "another manager"
+              : null;
+            const checked = selectedIds.includes(e.id);
+            return (
+              <label
+                key={e.id}
+                className={cn(
+                  "flex items-center gap-3 px-3 py-2 text-sm",
+                  alreadyManaged ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-muted/40"
+                )}
+              >
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-border flex-shrink-0"
+                  checked={checked}
+                  disabled={alreadyManaged}
+                  onChange={() => toggle(e.id, alreadyManaged)}
+                />
+                <span className="flex-1 min-w-0 truncate">
+                  <span className="font-medium text-foreground">{e.name}</span>
+                  <span className="text-muted-foreground"> · {e.id} · {e.department}</span>
+                </span>
+                {alreadyManaged && (
+                  <span className="text-xs text-muted-foreground flex-shrink-0">
+                    Reports to {currentManagerName}
+                  </span>
+                )}
+              </label>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
 }
 
 function EmployeeForm({
   initial,
   managers,
+  allEmployees,
   errors,
   onChange,
   isEdit,
 }: {
   initial: EmployeeFormData;
   managers: EmployeeProfile[];
+  allEmployees: EmployeeProfile[];
   errors: Record<string, string>;
   onChange: (next: EmployeeFormData) => void;
   isEdit: boolean;
@@ -4517,6 +5153,14 @@ function EmployeeForm({
         <option value="GM">General Manager</option>
         <option value="HR">HR</option>
       </Select>
+      {!isEdit && initial.role === "MANAGER" && (
+        <TeamMembersField
+          candidates={allEmployees.filter((e) => e.role === "EMPLOYEE" && e.status === "ACTIVE")}
+          allEmployees={allEmployees}
+          selectedIds={initial.teamMemberIds}
+          onChange={(ids) => onChange({ ...initial, teamMemberIds: ids })}
+        />
+      )}
       <Select label="Direct Manager" value={initial.managerId} onChange={field("managerId")} error={errors.managerId}>
         <option value="">None</option>
         {managers.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -4581,6 +5225,7 @@ const EMPTY_FORM: EmployeeFormData = {
   position: "", department: "", role: "EMPLOYEE" as UserRole,
   managerId: "", status: "ACTIVE", password: "",
   annualDays: "14", casualDays: "7", permissionMinutes: "240",
+  teamMemberIds: [],
 };
 
 function HREmployeesPage() {
@@ -4630,6 +5275,9 @@ function HREmployeesPage() {
       annualDays: String(emp.entitlements?.ANNUAL ?? DEFAULT_ENTITLEMENTS.ANNUAL),
       casualDays: String(emp.entitlements?.CASUAL ?? DEFAULT_ENTITLEMENTS.CASUAL),
       permissionMinutes: String(emp.permissionMinutesPerMonth ?? DEFAULT_PERMISSION_MINUTES),
+      // Team Members is an add-only field — editing a manager's team happens
+      // by editing each report's own Direct Manager, unchanged by this feature.
+      teamMemberIds: [],
     });
     setEditErrors({});
   }
@@ -4841,12 +5489,35 @@ function HREmployeesPage() {
                 </div>
               ))}
             </div>
+            {addResult.employee.role === "MANAGER" && (() => {
+              // employees is already the post-creation state (StoreProvider's
+              // mutate() re-renders synchronously), so this reflects exactly
+              // who now reports to the new manager — not just what was requested.
+              const team = employees.filter((e) => e.managerId === addResult.employee.id);
+              return team.length > 0 ? (
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1.5">
+                    Team Members ({team.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {team.map((e) => (
+                      <span key={e.id} className="inline-flex items-center rounded-full bg-primary/10 text-primary text-xs font-medium px-2.5 py-1">
+                        {e.name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">No team members assigned yet.</p>
+              );
+            })()}
             <p className="text-xs text-muted-foreground">Share the temporary password with the employee so they can log in.</p>
           </div>
         ) : (
           <EmployeeForm
             initial={addForm}
             managers={eligibleManagers}
+            allEmployees={employees}
             errors={addErrors}
             onChange={setAddForm}
             isEdit={false}
@@ -4870,6 +5541,7 @@ function HREmployeesPage() {
         <EmployeeForm
           initial={editForm}
           managers={eligibleManagers.filter((m) => m.id !== editTarget?.id)}
+          allEmployees={employees}
           errors={editErrors}
           onChange={setEditForm}
           isEdit={true}
@@ -5055,21 +5727,17 @@ function HRRequestDetailPage() {
   const decidingStep = [...request.approvals].reverse().find((a) => a.status !== "PENDING");
   const decidedByName = decidingStep ? `${decidingStep.approverName} (${decidingStep.title})` : "";
 
+  // Common to every request type. Type-specific fields (dates, times, leave
+  // type, location, purpose, reason, ...) live in typeDetails below instead —
+  // Leave, Mission and Permission each submit different information, so they
+  // are no longer forced into one shared field list.
   const details: { label: string; value: string }[] = [
     { label: "Request Number", value: request.requestNumber },
     { label: "Employee", value: request.employeeName },
     { label: "Employee ID", value: request.employeeId },
     { label: "Department", value: emp?.department ?? "—" },
     { label: "Approval Stage", value: stageLabel(request) },
-    { label: "Request Type", value: request.type },
-    ...(request.leaveType ? [{ label: "Leave Type", value: request.leaveType }] : []),
-    { label: "Start Date", value: fmtDate(request.startDate) },
-    ...(request.startTime ? [{ label: "Start Time", value: request.startTime }] : []),
-    { label: "End Date", value: fmtDate(request.endDate) },
-    ...(request.endTime ? [{ label: "End Time", value: request.endTime }] : []),
-    ...(request.location ? [{ label: "Location", value: request.location }] : []),
-    ...(request.reason ? [{ label: "Reason", value: request.reason }] : []),
-    ...(request.purpose ? [{ label: "Purpose", value: request.purpose }] : []),
+    { label: "Request Type", value: requestTypeLabel(request) },
     { label: "Submitted", value: fmtDate(request.submittedAt) },
     ...(request.decidedAt ? [{ label: "Decided", value: fmtDate(request.decidedAt) }] : []),
     ...(request.decisionComment
@@ -5079,6 +5747,8 @@ function HRRequestDetailPage() {
         }]
       : []),
   ];
+
+  const typeDetails = requestTypeDetailFields(request);
 
   return (
     <DashboardShell activeNavId="requests" pageTitle="Request Detail">
@@ -5112,6 +5782,20 @@ function HRRequestDetailPage() {
 
           <div className="rounded-[10px] border border-border p-4 mb-5">
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4">
+              Request Details
+            </p>
+            <div className="divide-y divide-border -mx-4">
+              {typeDetails.map(({ label, value }) => (
+                <div key={label} className="flex items-start gap-4 px-4 py-2.5">
+                  <p className="text-xs text-muted-foreground w-32 flex-shrink-0 pt-0.5">{label}</p>
+                  <p className="text-sm text-foreground">{value}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-[10px] border border-border p-4 mb-5">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4">
               Approval chain
             </p>
             <RequestTimeline request={request} />
@@ -5132,17 +5816,29 @@ function HRRequestDetailPage() {
 
 function HRNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead } = useStore();
+  const { notifications, markNotificationRead, markAllNotificationsRead } = useStore();
   const navigate = useNavigate();
 
   const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
+  const hasUnread = myNotifs.some((n) => !n.read);
 
   return (
     <DashboardShell activeNavId="notifications" pageTitle="Notifications">
       <div className="max-w-2xl">
-        <h2 className="text-lg font-semibold text-foreground mb-5">Notifications</h2>
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
+          {myNotifs.length > 0 && (
+            <button
+              onClick={() => markAllNotificationsRead(session!.user.id)}
+              disabled={!hasUnread}
+              className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
+            >
+              Mark all as read
+            </button>
+          )}
+        </div>
         {myNotifs.length === 0 ? (
           <Card>
             <EmptyState
