@@ -1,0 +1,31 @@
+-- Phase 6B-12 — Settings & Configuration audit finding, carried over from an
+-- earlier audit: `departments` (20260906160000_departments_table.sql) was
+-- created AFTER the baseline privilege revoke
+-- (20260906140000_security_baseline_revoke_defaults.sql) and never repeated
+-- that migration's own required pattern — "each future migration must
+-- repeat this explicit revoke-then-grant pattern for anything new it
+-- creates" — leaving `anon` and `authenticated` with residual default
+-- privileges (MAINTAIN, REFERENCES, TRIGGER, TRUNCATE) that every other
+-- post-baseline table (leave_types, public_holidays, leave_allocations,
+-- company_approval_routing, requests, request_approvals, notifications,
+-- attendance — all checked live) does not carry.
+--
+-- Confirmed live before this migration: `anon` held REFERENCES, TRIGGER,
+-- TRUNCATE, MAINTAIN; `authenticated` held those same four in addition to
+-- its correct, RLS-scoped INSERT/SELECT/UPDATE.
+--
+-- Severity: low. RLS itself was never affected (departments_insert_hr/
+-- departments_update_hr already correctly gate every write via is_hr()),
+-- and PostgREST's REST/RPC surface has no path to invoke raw TRUNCATE or
+-- DDL — the anon/authenticated API keys never grant a raw Postgres
+-- connection. This is a defense-in-depth cleanup, not a fix for an
+-- exploitable gap.
+--
+-- Fix: revoke everything from anon/authenticated on this one table, then
+-- re-grant exactly the functional privileges the app actually uses
+-- (authenticated: INSERT, SELECT, UPDATE — identical to what it already
+-- had; anon: nothing, matching every other table). No RLS policy, no
+-- schema change, no data change.
+
+REVOKE ALL ON departments FROM anon, authenticated;
+GRANT INSERT, SELECT, UPDATE ON departments TO authenticated;
