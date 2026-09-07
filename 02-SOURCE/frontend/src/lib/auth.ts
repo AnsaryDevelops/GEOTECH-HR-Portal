@@ -11,16 +11,19 @@
 //
 // PHASE 5 — hybrid, transitional design. Real employee accounts, once
 // created through the provision-employee Edge Function (see that file for
-// the full chain), authenticate through actual Supabase Auth: the Employee
-// Code is translated to a synthetic, non-mailable email
-// (`<code>@auth.internal`, matching PRODUCTION-BACKEND-PLAN.md §6.2) and
-// signed in via supabase.auth.signInWithPassword. The existing seeded demo
-// accounts are not migrated yet (Phase 6) and have no Supabase Auth user at
-// all, so they keep authenticating through the original localStorage
-// credential store below, unchanged. signIn() tries Supabase first and
-// falls back to the local store only when Supabase reports "no such
-// account" — see signIn()'s own comment for why that ordering, and why
-// falling back on an ambiguous error is safe.
+// the full chain) or provisioned directly in Supabase Auth (e.g. the first
+// HR account), authenticate through actual Supabase Auth: the Employee Code
+// is resolved to that profile's real Supabase Auth login email via the
+// `resolve_login_identity` RPC (never guessed or derived client-side — a
+// real account is not guaranteed to use the synthetic
+// `<code>@auth.internal` scheme the Edge Function assigns; see that
+// migration's comment), then signed in via supabase.auth.signInWithPassword.
+// The existing seeded demo accounts are not migrated yet (Phase 6) and have
+// no Supabase Auth user at all, so they keep authenticating through the
+// original localStorage credential store below, unchanged. signIn() tries
+// Supabase first and falls back to the local store only when Supabase
+// reports "no such account" — see signIn()'s own comment for why that
+// ordering, and why falling back on an ambiguous error is safe.
 //
 // The employee record (local store, or the `profiles` table under RLS) is
 // always the source of truth for role and status, so HR deactivating an
@@ -221,17 +224,35 @@ export function getSession(): Session | null {
 
 // ─── Supabase Auth ─────────────────────────────────────────────────────────────
 
-const SYNTHETIC_EMAIL_DOMAIN = 'auth.internal'
+interface LoginIdentity {
+  auth_id: string
+  login_email: string
+  status: 'ACTIVE' | 'INACTIVE'
+}
 
 /**
- * Deterministic translation from the business login identifier to Supabase
- * Auth's required email handle — never shown in the UI, never used for real
- * mail delivery, fully decoupled from the profile's real contact email
- * (§6.2). The provision-employee Edge Function must derive this identically
- * when creating the Auth user, or sign-in will never find it.
+ * Resolves Employee Code -> Supabase Auth login email via the
+ * `resolve_login_identity` RPC (SECURITY DEFINER; see its migration for why
+ * a direct table read cannot do this pre-auth). Returns `null` for an
+ * unknown code, an RPC failure, or a missing Supabase client — the caller
+ * treats all three identically ("not a real account here") so that response
+ * shape never signals which case occurred.
  */
-function employeeCodeToSyntheticEmail(employeeCode: string): string {
-  return `${employeeCode.toLowerCase()}@${SYNTHETIC_EMAIL_DOMAIN}`
+async function resolveLoginIdentity(employeeCode: string): Promise<LoginIdentity | null> {
+  if (!supabase) return null
+
+  try {
+    const { data, error } = await supabase.rpc('resolve_login_identity', {
+      p_employee_code: employeeCode,
+    })
+    if (error) return null
+
+    const row = (Array.isArray(data) ? data[0] : data) as LoginIdentity | undefined
+    if (!row?.login_email || !row.auth_id) return null
+    return row
+  } catch {
+    return null
+  }
 }
 
 interface ProfileRow {
@@ -293,10 +314,13 @@ function toSession(profile: ProfileRow, expiresAtSeconds: number | undefined): S
 async function signInWithSupabase(employeeCode: string, password: string): Promise<AuthResult | null> {
   if (!supabase) return null
 
+  const identity = await resolveLoginIdentity(employeeCode)
+  if (!identity) return null // no matching real account — fall through to the local demo path
+
   let authResponse
   try {
     authResponse = await supabase.auth.signInWithPassword({
-      email: employeeCodeToSyntheticEmail(employeeCode),
+      email: identity.login_email,
       password,
     })
   } catch {
@@ -305,6 +329,13 @@ async function signInWithSupabase(employeeCode: string, password: string): Promi
 
   const { data, error } = authResponse
   if (error || !data.session) return null
+
+  if (data.session.user.id !== identity.auth_id) {
+    // Should never happen — profiles.id is a foreign key straight into
+    // auth.users.id — but fail closed rather than trust a mismatch.
+    await supabase.auth.signOut()
+    return { ok: false, error: 'SYSTEM_ERROR' }
+  }
 
   const profileResult = await resolveActiveProfile(data.session.user.id)
   if ('error' in profileResult) {
