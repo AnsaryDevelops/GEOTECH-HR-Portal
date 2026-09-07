@@ -1648,6 +1648,21 @@ interface StoreContextValue {
   holidays: HolidayRecord[];
   /** Real, Supabase-backed public holidays (Phase 6B-2) — see supabase/migrations/20260906130500_public_holidays.sql. Only HolidaysSection's management UI reads this, for a real HR session. */
   remoteHolidays: HolidayRecord[];
+  /**
+   * The signed-in real user's own leave_allocations for the current calendar
+   * year (Phase 6B-3) — {ANNUAL:0,CASUAL:0} for a demo session, an
+   * unconfigured real employee, or before the fetch resolves. Never another
+   * employee's data — always self-scoped, regardless of caller role.
+   */
+  myLeaveAllocations: { ANNUAL: number; CASUAL: number };
+  /**
+   * On-demand read of one employee's current-year leave_allocations —
+   * HR-only usage (HREmployeesPage's Edit form); leave_allocations_select_self_or_hr
+   * RLS re-enforces this server-side (a non-HR caller passing someone else's
+   * id simply gets nothing back, not an error). Returns {ANNUAL:0,CASUAL:0}
+   * if no allocation has been set yet — never a fabricated default.
+   */
+  fetchEmployeeLeaveAllocations: (profileId: string) => Promise<{ ANNUAL: number; CASUAL: number }>;
   /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. */
   departments: DepartmentRecord[];
   /** The singleton Technical Manager/General Manager routing slots — null values mean "not yet configured." */
@@ -1673,7 +1688,10 @@ interface StoreContextValue {
   // signature here is unchanged from before Phase 6A.
   createEmployee: (
     data: CreateEmployeeInput
-  ) => Promise<{ ok: true; employee: EmployeeProfile; password: string } | { ok: false; errors: Record<string, string> }>;
+  ) => Promise<
+    | { ok: true; employee: EmployeeProfile; password: string; warning?: string }
+    | { ok: false; errors: Record<string, string> }
+  >;
   updateEmployee: (id: string, data: Partial<EmployeeProfile>) => Promise<{ ok: boolean; error?: string }>;
   /** True once `id` is known to be a real Supabase-backed profile, not a local demo employee. */
   isRemoteEmployee: (id: string) => boolean;
@@ -1928,6 +1946,74 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }
   }, []);
 
+  // The signed-in real user's own leave_allocations for the current calendar
+  // year (Phase 6B-3) — always self-scoped via an explicit profile_id
+  // filter, even though leave_allocations_select_self_or_hr would also let
+  // an HR caller read everyone's: this hook answers "what is MY balance,"
+  // never "what is everyone's." {ANNUAL:0,CASUAL:0} means either no
+  // allocation has been set yet (real, honest 0 — never fabricated) or the
+  // caller is a local demo session (unused there — see useMyBalances/
+  // LeaveRequestPage, which only apply this for a real session).
+  const [myLeaveAllocations, setMyLeaveAllocations] = useState<{ ANNUAL: number; CASUAL: number }>({
+    ANNUAL: 0,
+    CASUAL: 0,
+  });
+
+  const fetchMyLeaveAllocations = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !session) {
+      setMyLeaveAllocations({ ANNUAL: 0, CASUAL: 0 });
+      return;
+    }
+    try {
+      const year = new Date().getFullYear();
+      const { data, error } = await supabase
+        .from("leave_allocations")
+        .select("bucket, allocated_days")
+        .eq("profile_id", session.user.id)
+        .eq("year", year);
+      if (error || !data) {
+        setMyLeaveAllocations({ ANNUAL: 0, CASUAL: 0 });
+        return;
+      }
+      const next = { ANNUAL: 0, CASUAL: 0 };
+      for (const row of data as { bucket: string; allocated_days: number }[]) {
+        if (row.bucket === "ANNUAL" || row.bucket === "CASUAL") next[row.bucket] = row.allocated_days;
+      }
+      setMyLeaveAllocations(next);
+    } catch {
+      setMyLeaveAllocations({ ANNUAL: 0, CASUAL: 0 });
+    }
+  }, [session]);
+
+  // On-demand, single-employee read — HR's Edit Employee form only, to
+  // pre-populate the Opening Balances fields with that employee's real
+  // current allocation rather than the hardcoded 0 every remote profile
+  // otherwise carries (entitlements has no backing column on profiles
+  // itself — see mapProfileRowToEmployeeProfile). Not stored in ongoing
+  // state like the fetch above; called imperatively and returned directly.
+  const fetchEmployeeLeaveAllocations = useCallback(
+    async (profileId: string): Promise<{ ANNUAL: number; CASUAL: number }> => {
+      if (!isSupabaseConfigured || !supabase) return { ANNUAL: 0, CASUAL: 0 };
+      try {
+        const year = new Date().getFullYear();
+        const { data, error } = await supabase
+          .from("leave_allocations")
+          .select("bucket, allocated_days")
+          .eq("profile_id", profileId)
+          .eq("year", year);
+        if (error || !data) return { ANNUAL: 0, CASUAL: 0 };
+        const next = { ANNUAL: 0, CASUAL: 0 };
+        for (const row of data as { bucket: string; allocated_days: number }[]) {
+          if (row.bucket === "ANNUAL" || row.bucket === "CASUAL") next[row.bucket] = row.allocated_days;
+        }
+        return next;
+      } catch {
+        return { ANNUAL: 0, CASUAL: 0 };
+      }
+    },
+    []
+  );
+
   // Re-fetch whenever the signed-in session changes (login/logout/switching
   // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
   // session is actually allowed to see (self/reports/own-manager for a
@@ -1940,14 +2026,27 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // non-HR session, all rows to HR. public_holidays has no active/inactive
   // concept at all (public_holidays_select_all is USING (true)) — every row
   // is visible to every authenticated session, real HR included; only
-  // INSERT/DELETE are HR-gated.
+  // INSERT/DELETE are HR-gated. leave_allocations' own RLS (self-or-HR)
+  // means a demo session's query (an invalid UUID against profile_id, run
+  // as anon regardless) simply errors and falls back to {ANNUAL:0,CASUAL:0}
+  // — never a crash, and never applied to a demo employee's own entitlements
+  // (see useMyBalances/LeaveRequestPage's real-only guard).
   useEffect(() => {
     fetchRemoteEmployees();
     fetchDepartments();
     fetchApprovalRouting();
     fetchRemoteLeaveTypes();
     fetchRemoteHolidays();
-  }, [session, fetchRemoteEmployees, fetchDepartments, fetchApprovalRouting, fetchRemoteLeaveTypes, fetchRemoteHolidays]);
+    fetchMyLeaveAllocations();
+  }, [
+    session,
+    fetchRemoteEmployees,
+    fetchDepartments,
+    fetchApprovalRouting,
+    fetchRemoteLeaveTypes,
+    fetchRemoteHolidays,
+    fetchMyLeaveAllocations,
+  ]);
 
   // The one list every page already reads via useStore().employees — local
   // demo roster first, then real Supabase employees. No id collision is
@@ -2459,6 +2558,26 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       permissionMinutesPerMonth: data.permissionMinutes,
     };
 
+    // Persist the Opening Balances the form just collected as real
+    // leave_allocations rows (Phase 6B-3) — leave_allocations_insert_hr RLS
+    // re-checks is_hr() server-side. The Auth account and profile already
+    // exist at this point (provisionEmployeeAccount succeeded above); a
+    // failure here doesn't undo that, since there is no safe client-side
+    // rollback for an already-created Auth user — it is surfaced as a
+    // non-blocking warning instead of silently discarded or failing the
+    // whole (already-successful) creation.
+    let warning: string | undefined;
+    if (supabase) {
+      const year = new Date().getFullYear();
+      const { error: allocError } = await supabase.from("leave_allocations").insert([
+        { profile_id: result.profile.id, bucket: "ANNUAL", year, allocated_days: data.annualDays },
+        { profile_id: result.profile.id, bucket: "CASUAL", year, allocated_days: data.casualDays },
+      ]);
+      if (allocError) {
+        warning = `Employee created, but the opening leave balance could not be saved: ${allocError.message}`;
+      }
+    }
+
     // Re-fetch rather than hand-patch the local cache: creating a manager
     // with a team reassigns those team members' manager_id server-side
     // (hr_create_manager_with_team), and a plain re-fetch is the simplest
@@ -2466,7 +2585,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     // only after the next unrelated refresh.
     await fetchRemoteEmployees();
 
-    return { ok: true as const, employee, password: data.password };
+    return { ok: true as const, employee, password: data.password, warning };
   }
 
   async function updateEmployee(id: string, data: Partial<EmployeeProfile>): Promise<{ ok: boolean; error?: string }> {
@@ -2516,11 +2635,28 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       if (data.managerId !== undefined) patch.manager_id = data.managerId;
       if (data.permissionMinutesPerMonth !== undefined) patch.permission_minutes_per_month = data.permissionMinutesPerMonth;
       if (data.departmentId !== undefined) patch.department_id = data.departmentId || null;
-      // entitlements has no backing column (leave_allocations is a later
-      // Phase 6 stage) — deliberately never sent.
+      // entitlements has no backing column on profiles itself — it is
+      // written to leave_allocations separately below (Phase 6B-3).
 
       const { error } = await supabase.from("profiles").update(patch).eq("id", id);
       if (error) return { ok: false, error: error.message };
+
+      // Opening Balances (Phase 6B-3) — leave_allocations_insert_hr/
+      // _update_hr RLS re-check is_hr() server-side. upsert covers both "no
+      // allocation yet" (insert) and "already has one for this year"
+      // (update) in one call, matching the table's own
+      // unique(profile_id, bucket, year) constraint.
+      if (data.entitlements !== undefined) {
+        const year = new Date().getFullYear();
+        const { error: allocError } = await supabase.from("leave_allocations").upsert(
+          [
+            { profile_id: id, bucket: "ANNUAL", year, allocated_days: data.entitlements.ANNUAL },
+            { profile_id: id, bucket: "CASUAL", year, allocated_days: data.entitlements.CASUAL },
+          ],
+          { onConflict: "profile_id,bucket,year" }
+        );
+        if (allocError) return { ok: false, error: allocError.message };
+      }
 
       await fetchRemoteEmployees();
       return { ok: true };
@@ -2687,6 +2823,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       requests: store.requests, notifications: store.notifications,
       employees, leaveTypes: store.leaveTypes, remoteLeaveTypes,
       attendance: store.attendance, holidays: store.holidays, remoteHolidays,
+      myLeaveAllocations, fetchEmployeeLeaveAllocations,
       departments, approvalRouting,
       createLeaveRequest, createMissionRequest, createPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
@@ -3138,15 +3275,23 @@ function ApproverInfo({ chain }: { chain: ApprovalStep[] }) {
 /** Everything the signed-in employee needs to know about their own allowances. */
 function useMyBalances() {
   const { session } = useAuth();
-  const { requests, employees, attendance } = useStore();
+  const { requests, employees, attendance, myLeaveAllocations, isRemoteEmployee } = useStore();
 
   const me = employees.find((e) => e.id === session!.user.id) ?? null;
   const month = currentMonthKey(new Date());
 
+  // Real employee: entitlements comes from the real leave_allocations fetch
+  // (Phase 6B-3), never the hardcoded 0/0 every remote profile otherwise
+  // carries (entitlements has no backing column on profiles itself). Demo
+  // employee: unchanged — me.entitlements is already a real local field.
+  // requests/attendance stay local for everyone until Phase 6B-4+, exactly
+  // as getLeaveBalance/getPermissionBalance already expect.
+  const leaveMe = me && isRemoteEmployee(session!.user.id) ? { ...me, entitlements: myLeaveAllocations } : me;
+
   return {
     me,
     month,
-    leave: me ? getAllLeaveBalances(me, requests) : [],
+    leave: leaveMe ? getAllLeaveBalances(leaveMe, requests) : [],
     permission: me ? getPermissionBalance(me, requests, attendance, month) : null,
   };
 }
@@ -3596,7 +3741,7 @@ function NewRequestPage() {
 function LeaveRequestPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
-  const { requests, leaveTypes, employees, holidays, createLeaveRequest } = useStore();
+  const { requests, leaveTypes, employees, holidays, createLeaveRequest, myLeaveAllocations, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
 
   const manager = getManagerForEmployee(employees, session!.user.id);
@@ -3612,7 +3757,11 @@ function LeaveRequestPage() {
   // Same ANNUAL balance shown elsewhere (getLeaveBalance) — never adjusted by
   // the current, unsaved form. requestedDays is a separate, live figure from
   // the existing countWorkingDays(), computed from whatever dates are typed in.
-  const me = employees.find((e) => e.id === session!.user.id) ?? null;
+  // Real employee: entitlements comes from the real leave_allocations fetch
+  // (Phase 6B-3) instead of the hardcoded 0/0 every remote profile otherwise
+  // carries — display only; submission below is untouched.
+  const rawMe = employees.find((e) => e.id === session!.user.id) ?? null;
+  const me = rawMe && isRemoteEmployee(session!.user.id) ? { ...rawMe, entitlements: myLeaveAllocations } : rawMe;
   const annualBalance = me ? getLeaveBalance(me, requests, "ANNUAL") : null;
   const requestedDays = countWorkingDays(startDate, endDate, holidays);
 
@@ -5852,7 +6001,7 @@ const EMPTY_FORM: EmployeeFormData = {
 };
 
 function HREmployeesPage() {
-  const { employees, createEmployee, updateEmployee, isRemoteEmployee, departments } = useStore();
+  const { employees, createEmployee, updateEmployee, isRemoteEmployee, departments, fetchEmployeeLeaveAllocations } = useStore();
   const [search, setSearch] = useState("");
   const [filterRole, setFilterRole] = useState<"" | UserRole>("");
   const [filterDept, setFilterDept] = useState("");
@@ -5862,7 +6011,7 @@ function HREmployeesPage() {
   const [showAdd, setShowAdd] = useState(false);
   const [addForm, setAddForm] = useState<EmployeeFormData>(EMPTY_FORM);
   const [addErrors, setAddErrors] = useState<Record<string, string>>({});
-  const [addResult, setAddResult] = useState<{ employee: EmployeeProfile; password: string } | null>(null);
+  const [addResult, setAddResult] = useState<{ employee: EmployeeProfile; password: string; warning?: string } | null>(null);
   const [addSaving, setAddSaving] = useState(false);
 
   // Edit employee modal
@@ -5906,6 +6055,22 @@ function HREmployeesPage() {
       teamMemberIds: [],
     });
     setEditErrors({});
+
+    // Real employee: the form above opens immediately with a same-as-today
+    // placeholder (emp.entitlements is hardcoded 0/0 for every remote
+    // profile — see mapProfileRowToEmployeeProfile), then quietly replaces
+    // Annual/Casual Days with that employee's actual current-year
+    // leave_allocations once the fetch resolves — never a stale previous
+    // employee's numbers, and never a fabricated non-zero default.
+    if (isRemoteEmployee(emp.id)) {
+      fetchEmployeeLeaveAllocations(emp.id).then((real) => {
+        setEditForm((prev) => ({
+          ...prev,
+          annualDays: String(real.ANNUAL),
+          casualDays: String(real.CASUAL),
+        }));
+      });
+    }
   }
 
   async function handleAdd() {
@@ -5936,7 +6101,7 @@ function HREmployeesPage() {
     });
     setAddSaving(false);
     if (!result.ok) { setAddErrors((result as { ok: false; errors: Record<string, string> }).errors); return; }
-    setAddResult({ employee: result.employee, password: result.password });
+    setAddResult({ employee: result.employee, password: result.password, warning: result.warning });
   }
 
   async function handleEdit() {
@@ -6134,6 +6299,11 @@ function HREmployeesPage() {
             <Alert variant="success">
               <p className="text-sm font-medium">Employee created successfully.</p>
             </Alert>
+            {addResult.warning && (
+              <Alert variant="warning">
+                <p className="text-sm">{addResult.warning}</p>
+              </Alert>
+            )}
             <div className="rounded-[10px] border border-border divide-y divide-border">
               {[
                 { label: "Employee ID", value: addResult.employee.employeeCode ?? addResult.employee.id },
