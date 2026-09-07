@@ -1644,7 +1644,10 @@ interface StoreContextValue {
   /** Real, Supabase-backed leave types (Phase 6B-1) — see supabase/migrations/20260906130200_leave_types.sql. Only HRSettingsPage's management UI reads this, for a real HR session. */
   remoteLeaveTypes: LeaveTypeRecord[];
   attendance: AttendanceRecord[];
+  /** Local/demo public holidays — unconditionally `store.holidays`. Leave/Permission submission and the calendar widget read this, unchanged since before Phase 6B-2. */
   holidays: HolidayRecord[];
+  /** Real, Supabase-backed public holidays (Phase 6B-2) — see supabase/migrations/20260906130500_public_holidays.sql. Only HolidaysSection's management UI reads this, for a real HR session. */
+  remoteHolidays: HolidayRecord[];
   /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. */
   departments: DepartmentRecord[];
   /** The singleton Technical Manager/General Manager routing slots — null values mean "not yet configured." */
@@ -1710,8 +1713,16 @@ interface StoreContextValue {
     recordedBy: string
   ) => { ok: boolean; error?: string };
   deleteAttendance: (id: string) => void;
-  createHoliday: (date: string, name: string) => { ok: boolean; error?: string };
-  deleteHoliday: (id: string) => void;
+  /**
+   * Real path is HR-only (public_holidays_insert_hr RLS re-enforces
+   * server-side); demo path unchanged since before Phase 6B-2. Public
+   * Holidays has no archive/inactive concept in either layer — add/remove
+   * only, matching public_holidays' own RLS exactly (INSERT/DELETE grants,
+   * no UPDATE grant at all).
+   */
+  createHoliday: (date: string, name: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Real path is HR-only (public_holidays_delete_hr RLS re-enforces server-side); demo path unchanged. */
+  deleteHoliday: (id: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 // Phase 6A — profiles only. Maps one `profiles` row (Supabase) onto the
@@ -1888,6 +1899,35 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }
   }, []);
 
+  // Real, Supabase-backed public holidays (Phase 6B-2) — exposed as its own
+  // context field, deliberately separate from `holidays` (which stays
+  // exactly `store.holidays`, unconditionally local). Leave/Permission
+  // submission and the calendar widget are NOT part of this phase — they
+  // still read the local list for every employee, real or demo, exactly as
+  // before. Only HolidaysSection's management UI reads this, and only for a
+  // real HR session — see HolidaysSection's own real-vs-demo switch.
+  const [remoteHolidays, setRemoteHolidays] = useState<HolidayRecord[]>([]);
+
+  const fetchRemoteHolidays = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setRemoteHolidays([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("public_holidays")
+        .select("id, date, name")
+        .order("date");
+      if (error || !data) {
+        setRemoteHolidays([]);
+        return;
+      }
+      setRemoteHolidays(data as HolidayRecord[]);
+    } catch {
+      setRemoteHolidays([]);
+    }
+  }, []);
+
   // Re-fetch whenever the signed-in session changes (login/logout/switching
   // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
   // session is actually allowed to see (self/reports/own-manager for a
@@ -1897,13 +1937,17 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // fetchRemoteEmployees already treats as "no remote employees" — never a
   // crash. Departments RLS (departments_select_active) and leave_types RLS
   // (leave_types_select_active) similarly return only ACTIVE rows to a
-  // non-HR session, all rows to HR.
+  // non-HR session, all rows to HR. public_holidays has no active/inactive
+  // concept at all (public_holidays_select_all is USING (true)) — every row
+  // is visible to every authenticated session, real HR included; only
+  // INSERT/DELETE are HR-gated.
   useEffect(() => {
     fetchRemoteEmployees();
     fetchDepartments();
     fetchApprovalRouting();
     fetchRemoteLeaveTypes();
-  }, [session, fetchRemoteEmployees, fetchDepartments, fetchApprovalRouting, fetchRemoteLeaveTypes]);
+    fetchRemoteHolidays();
+  }, [session, fetchRemoteEmployees, fetchDepartments, fetchApprovalRouting, fetchRemoteLeaveTypes, fetchRemoteHolidays]);
 
   // The one list every page already reads via useStore().employees — local
   // demo roster first, then real Supabase employees. No id collision is
@@ -2144,24 +2188,57 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     mutate((p) => ({ ...p, attendance: p.attendance.filter((a) => a.id !== id) }));
   }
 
-  function createHoliday(date: string, name: string): { ok: boolean; error?: string } {
+  // Real path is HR-only (public_holidays_insert_hr RLS re-checks this
+  // server-side too — the frontend is never the security boundary). No
+  // status/archive concept exists on either layer — add/remove only,
+  // matching public_holidays' own RLS (INSERT/DELETE grants, no UPDATE).
+  async function createHoliday(date: string, name: string): Promise<{ ok: boolean; error?: string }> {
     if (!date) return { ok: false, error: "Choose a date." };
-    if (!name.trim()) return { ok: false, error: "Give the holiday a name." };
+    const trimmed = name.trim();
+    if (!trimmed) return { ok: false, error: "Give the holiday a name." };
+
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      if (remoteHolidays.some((h) => h.date === date)) {
+        return { ok: false, error: "That date is already a public holiday." };
+      }
+      const { error } = await supabase.from("public_holidays").insert({ date, name: trimmed });
+      if (error) {
+        return {
+          ok: false,
+          error: error.code === "23505" ? "That date is already a public holiday." : error.message,
+        };
+      }
+      await fetchRemoteHolidays();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
     if (store.holidays.some((h) => h.date === date)) {
       return { ok: false, error: "That date is already a public holiday." };
     }
-
     mutate((p) => ({
       ...p,
-      holidays: [...p.holidays, { id: `hol-${p.nextHolidaySeq}`, date, name: name.trim() }]
+      holidays: [...p.holidays, { id: `hol-${p.nextHolidaySeq}`, date, name: trimmed }]
         .sort((a, b) => a.date.localeCompare(b.date)),
       nextHolidaySeq: p.nextHolidaySeq + 1,
     }));
     return { ok: true };
   }
 
-  function deleteHoliday(id: string) {
+  // Real path HR-only (public_holidays_delete_hr RLS re-checks server-side).
+  async function deleteHoliday(id: string): Promise<{ ok: boolean; error?: string }> {
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      const { error } = await supabase.from("public_holidays").delete().eq("id", id);
+      if (error) return { ok: false, error: error.message };
+      await fetchRemoteHolidays();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
     mutate((p) => ({ ...p, holidays: p.holidays.filter((h) => h.id !== id) }));
+    return { ok: true };
   }
 
   // Approving advances the request to the next stage in its snapshotted chain.
@@ -2609,7 +2686,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     <StoreCtx.Provider value={{
       requests: store.requests, notifications: store.notifications,
       employees, leaveTypes: store.leaveTypes, remoteLeaveTypes,
-      attendance: store.attendance, holidays: store.holidays,
+      attendance: store.attendance, holidays: store.holidays, remoteHolidays,
       departments, approvalRouting,
       createLeaveRequest, createMissionRequest, createPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
@@ -6796,16 +6873,35 @@ function HRSettingsPage() {
 // Public holidays drive the working-day count, so they belong to HR alongside
 // leave types. Islamic dates shift every year, which is why they are data.
 function HolidaysSection() {
-  const { holidays, createHoliday, deleteHoliday } = useStore();
+  const { session } = useAuth();
+  const { holidays: localHolidays, remoteHolidays, createHoliday, deleteHoliday, isRemoteEmployee } = useStore();
+  // Real HR (e.g. TESTHR01) manages the real Supabase list; a local demo HR
+  // account keeps managing the existing local one, unaffected — same
+  // isolation rule as Phase 6B-1 Leave Types.
+  const holidays = session && isRemoteEmployee(session.user.id) ? remoteHolidays : localHolidays;
+
   const [date, setDate] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  const [removingId, setRemovingId] = useState("");
 
-  function handleAdd() {
-    const res = createHoliday(date, name);
+  async function handleAdd() {
+    setSaving(true);
+    const res = await createHoliday(date, name);
+    setSaving(false);
     if (!res.ok) { setError(res.error ?? "Could not add that holiday."); return; }
     setDate(""); setName(""); setError(""); setOpen(false);
+  }
+
+  async function handleRemove(id: string) {
+    setRemoveError("");
+    setRemovingId(id);
+    const res = await deleteHoliday(id);
+    setRemovingId("");
+    if (!res.ok) setRemoveError(res.error ?? "Could not remove that holiday.");
   }
 
   return (
@@ -6832,12 +6928,14 @@ function HolidaysSection() {
               <Input placeholder="Holiday name" value={name} onChange={(e) => { setName(e.target.value); setError(""); }} error={error} />
             </div>
             <div className="flex gap-2 pt-0.5">
-              <Button variant="primary" onClick={handleAdd}>Save</Button>
+              <Button variant="primary" onClick={handleAdd} loading={saving}>Save</Button>
               <Button variant="secondary" onClick={() => { setOpen(false); setError(""); }}>Cancel</Button>
             </div>
           </div>
         </Card>
       )}
+
+      {removeError && <Alert variant="error" className="mb-3">{removeError}</Alert>}
 
       <Card padding={false}>
         {holidays.length === 0 ? (
@@ -6851,10 +6949,11 @@ function HolidaysSection() {
                 <p className="text-sm font-medium text-foreground w-32 flex-shrink-0 tabular-nums">{fmtDate(h.date)}</p>
                 <p className="text-sm text-muted-foreground flex-1 min-w-0 truncate">{h.name}</p>
                 <button
-                  onClick={() => deleteHoliday(h.id)}
-                  className="text-xs text-destructive hover:underline flex-shrink-0"
+                  onClick={() => handleRemove(h.id)}
+                  disabled={removingId === h.id}
+                  className="text-xs text-destructive hover:underline flex-shrink-0 disabled:opacity-50 disabled:pointer-events-none"
                 >
-                  Remove
+                  {removingId === h.id ? "Removing…" : "Remove"}
                 </button>
               </div>
             ))}
