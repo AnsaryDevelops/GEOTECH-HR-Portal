@@ -1639,6 +1639,14 @@ interface CreateEmployeeInput {
 
 interface StoreContextValue {
   requests: RequestRecord[];
+  /**
+   * Real, Supabase-backed requests (+ full approval chains) visible to the
+   * signed-in session (Phase 6B-7) — see fetchRealRequests. Deliberately
+   * separate from `requests`, which stays exactly `store.requests`,
+   * unconditionally local/demo. Empty for a demo session or before the
+   * fetch resolves — never a fallback to `requests`.
+   */
+  realRequests: RequestRecord[];
   notifications: NotificationRecord[];
   employees: EmployeeProfile[];
   /** Local/demo leave type catalog — unconditionally `store.leaveTypes`. Leave submission reads this, unchanged since before Phase 6B-1. */
@@ -1717,6 +1725,18 @@ interface StoreContextValue {
    * enforced server-side, never trusted from the client.
    */
   deleteRealRequest: (requestId: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Real approvers only (Phase 6B-8) — calls decide_request directly;
+   * entirely separate from approveRequest/rejectRequest, which stay
+   * local/demo-only. Current approver, active stage, sequential advancement
+   * and final-stage completion are all re-derived and enforced server-side,
+   * never trusted from the client.
+   */
+  decideRealRequest: (
+    requestId: string,
+    action: "APPROVE" | "REJECT",
+    comment?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: (userId: string) => void;
   // HR-only operations. EMPLOYEE/MANAGER creation goes through the real
@@ -2151,6 +2171,51 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     []
   );
 
+  // Phase 6B-7 — the real requests (+ their full approval chains) visible to
+  // the signed-in session, exposed as its own context field, deliberately
+  // separate from `requests` (which stays exactly `store.requests`,
+  // unconditionally local — demo pages/logic are entirely untouched). RLS
+  // on `requests` alone already scopes exactly what a plain SELECT returns:
+  // own (requests_select_own), any request they hold an approval role in at
+  // any stage (requests_select_approver), or everything (requests_select_hr)
+  // — no client-side WHERE clause is added or needed, RLS is the boundary.
+  // One query: PostgREST embeds request_approvals via the existing FK, and
+  // the new request_approvals_select_via_request policy (Phase 6B-7) makes
+  // that embed return the request's FULL chain — not just the caller's own
+  // row — for any approver who can already see the parent request, matching
+  // what the existing RequestTimeline/stageLabel/currentStep display logic
+  // (all unchanged) already expects.
+  const REQUEST_SELECT_COLUMNS =
+    "id, request_number, employee_id, employee_name, manager_id, manager_name, type, status, submitted_at, leave_type_name, balance_key, working_days, start_date, end_date, reason, start_time, end_time, location, purpose, permission_kind, permission_minutes, decided_at, decision_comment, request_approvals(stage, role, title, approver_id, approver_name, status, decided_at, comment)";
+
+  const [realRequests, setRealRequests] = useState<RequestRecord[]>([]);
+
+  const fetchRealRequests = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !session) {
+      setRealRequests([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("requests")
+        .select(REQUEST_SELECT_COLUMNS)
+        .order("submitted_at", { ascending: false })
+        .order("stage", { foreignTable: "request_approvals", ascending: true });
+      if (error || !data) {
+        setRealRequests([]);
+        return;
+      }
+      setRealRequests(
+        data.map((row) => {
+          const approvalRows = Array.isArray(row.request_approvals) ? row.request_approvals : [];
+          return mapRequestRowToRequestRecord(row, approvalRows.map(mapApprovalRowToApprovalStep));
+        })
+      );
+    } catch {
+      setRealRequests([]);
+    }
+  }, [session]);
+
   // Re-fetch whenever the signed-in session changes (login/logout/switching
   // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
   // session is actually allowed to see (self/reports/own-manager for a
@@ -2167,7 +2232,9 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // means a demo session's query (an invalid UUID against profile_id, run
   // as anon regardless) simply errors and falls back to {ANNUAL:0,CASUAL:0}
   // — never a crash, and never applied to a demo employee's own entitlements
-  // (see useMyBalances/LeaveRequestPage's real-only guard).
+  // (see useMyBalances/LeaveRequestPage's real-only guard). requests' own
+  // RLS behaves identically for a demo session — anon has zero grants there
+  // either, so fetchRealRequests degrades to [] just as gracefully.
   useEffect(() => {
     fetchRemoteEmployees();
     fetchDepartments();
@@ -2175,6 +2242,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     fetchRemoteLeaveTypes();
     fetchRemoteHolidays();
     fetchMyLeaveAllocations();
+    fetchRealRequests();
   }, [
     session,
     fetchRemoteEmployees,
@@ -2183,6 +2251,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     fetchRemoteLeaveTypes,
     fetchRemoteHolidays,
     fetchMyLeaveAllocations,
+    fetchRealRequests,
   ]);
 
   // The one list every page already reads via useStore().employees — local
@@ -2243,6 +2312,9 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       row,
       approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
     );
+    // Keep realRequests in sync so My Requests/calendar reflect this
+    // submission without requiring a manual refresh (Phase 6B-7).
+    await fetchRealRequests();
     return { ok: true, request };
   }
 
@@ -2344,6 +2416,9 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       row,
       approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
     );
+    // Keep realRequests in sync so My Requests/calendar reflect this
+    // submission without requiring a manual refresh (Phase 6B-7).
+    await fetchRealRequests();
     return { ok: true, request };
   }
 
@@ -2428,6 +2503,9 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       row,
       approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
     );
+    // Keep realRequests in sync so My Requests/calendar reflect this
+    // submission without requiring a manual refresh (Phase 6B-7).
+    await fetchRealRequests();
     return { ok: true, request };
   }
 
@@ -2737,6 +2815,35 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
     const { error } = await supabase.rpc("delete_own_request", { p_request_id: requestId });
     if (error) return { ok: false, error: error.message };
+    // Keep realRequests in sync so it no longer appears (Phase 6B-7).
+    await fetchRealRequests();
+    return { ok: true };
+  }
+
+  // Phase 6B-8 — real approvers only. Entirely separate from
+  // approveRequest/rejectRequest below (untouched, demo-only): decide_request
+  // re-derives caller identity, the current pending stage, and its approver
+  // from auth.uid() and the actual request_approvals rows — nothing here is
+  // trusted from the client except which request, which action, and an
+  // optional comment. Sequential advancement, final-GM-stage completion, and
+  // rejection are entirely server-side (see the RPC itself).
+  async function decideRealRequest(
+    requestId: string,
+    action: "APPROVE" | "REJECT",
+    comment?: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    const { error } = await supabase.rpc("decide_request", {
+      p_request_id: requestId,
+      p_action: action,
+      p_comment: comment ?? null,
+    });
+    if (error) return { ok: false, error: error.message };
+    // Keep realRequests in sync — moves off this approver's Pending Requests,
+    // and (for an APPROVE that advances the chain) becomes visible to the
+    // next approver's own next fetch, immediately reflected here for this
+    // session's own detail/timeline view.
+    await fetchRealRequests();
     return { ok: true };
   }
 
@@ -3085,7 +3192,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
 
   return (
     <StoreCtx.Provider value={{
-      requests: store.requests, notifications: store.notifications,
+      requests: store.requests, realRequests, notifications: store.notifications,
       employees, leaveTypes: store.leaveTypes, remoteLeaveTypes,
       attendance: store.attendance, holidays: store.holidays, remoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
@@ -3094,7 +3201,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       createMissionRequest, submitRealMissionRequest,
       createPermissionRequest, submitRealPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
-      approveRequest, rejectRequest, deleteRequest, deleteRealRequest, markNotificationRead, markAllNotificationsRead,
+      approveRequest, rejectRequest, deleteRequest, deleteRealRequest, decideRealRequest, markNotificationRead, markAllNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
       createDepartment, updateDepartment, setApprovalRouting,
     }}>
@@ -3648,24 +3755,29 @@ function ApproverInfo({ chain }: { chain: ApprovalStep[] }) {
 /** Everything the signed-in employee needs to know about their own allowances. */
 function useMyBalances() {
   const { session } = useAuth();
-  const { requests, employees, attendance, myLeaveAllocations, isRemoteEmployee } = useStore();
+  const { requests, realRequests, employees, attendance, myLeaveAllocations, isRemoteEmployee } = useStore();
 
   const me = employees.find((e) => e.id === session!.user.id) ?? null;
   const month = currentMonthKey(new Date());
+  const isReal = !!me && isRemoteEmployee(session!.user.id);
 
   // Real employee: entitlements comes from the real leave_allocations fetch
   // (Phase 6B-3), never the hardcoded 0/0 every remote profile otherwise
   // carries (entitlements has no backing column on profiles itself). Demo
   // employee: unchanged — me.entitlements is already a real local field.
-  // requests/attendance stay local for everyone until Phase 6B-4+, exactly
-  // as getLeaveBalance/getPermissionBalance already expect.
-  const leaveMe = me && isRemoteEmployee(session!.user.id) ? { ...me, entitlements: myLeaveAllocations } : me;
+  // requests source is likewise swapped for a real employee (Phase 6B-7) —
+  // realRequests already contains only requests they are authorized to see,
+  // and for an employee that is exactly their own — so approved/pending
+  // real Leave and Permission requests now count toward used/held.
+  // attendance stays local for everyone until Attendance is migrated.
+  const leaveMe = isReal ? { ...me, entitlements: myLeaveAllocations } : me;
+  const myRequests = isReal ? realRequests : requests;
 
   return {
     me,
     month,
-    leave: leaveMe ? getAllLeaveBalances(leaveMe, requests) : [],
-    permission: me ? getPermissionBalance(me, requests, attendance, month) : null,
+    leave: leaveMe ? getAllLeaveBalances(leaveMe, myRequests) : [],
+    permission: me ? getPermissionBalance(me, myRequests, attendance, month) : null,
   };
 }
 
@@ -3809,16 +3921,22 @@ const CALENDAR_LEGEND: { state: CalendarDayState; label: string; dot: string }[]
  */
 function MyCalendarWidget() {
   const { session } = useAuth();
-  const { requests, attendance, holidays } = useStore();
+  const { requests, realRequests, attendance, holidays, remoteHolidays, isRemoteEmployee } = useStore();
 
   const employeeId = session!.user.id;
+  const isReal = isRemoteEmployee(employeeId);
+  // Real employee: real requests + the real public-holiday calendar
+  // (Phase 6B-7); demo employee: unchanged local sources. Attendance stays
+  // local for everyone until Attendance is migrated.
+  const myRequests = isReal ? realRequests : requests;
+  const myHolidays = isReal ? remoteHolidays : holidays;
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
   const todayStr = toISODate(now);
   const monthLabel = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-  const approvedAnnualLeave = requests.filter(
+  const approvedAnnualLeave = myRequests.filter(
     (r): r is RequestRecord & { startDate: string; endDate: string } =>
       r.employeeId === employeeId &&
       r.type === "LEAVE" &&
@@ -3830,7 +3948,7 @@ function MyCalendarWidget() {
 
   function dayState(dateStr: string, weekday: number): CalendarDayState {
     if (approvedAnnualLeave.some((r) => dateStr >= r.startDate && dateStr <= r.endDate)) return "LEAVE";
-    if (holidays.some((h) => h.date === dateStr)) return "HOLIDAY";
+    if (myHolidays.some((h) => h.date === dateStr)) return "HOLIDAY";
     const record = attendance.find((a) => a.employeeId === employeeId && a.date === dateStr);
     if (record?.checkIn && record?.checkOut) return "PRESENT";
     if (WEEKEND_DAYS.includes(weekday)) return "WEEKEND";
@@ -4115,7 +4233,7 @@ function LeaveRequestPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
   const {
-    requests, leaveTypes, remoteLeaveTypes, employees, holidays, remoteHolidays,
+    requests, realRequests, leaveTypes, remoteLeaveTypes, employees, holidays, remoteHolidays,
     createLeaveRequest, submitRealLeaveRequest, myLeaveAllocations, isRemoteEmployee,
   } = useStore();
   const navigate = useNavigate();
@@ -4153,7 +4271,7 @@ function LeaveRequestPage() {
   // check at submission time, never this client-side figure.
   const rawMe = employees.find((e) => e.id === session!.user.id) ?? null;
   const me = rawMe && isReal ? { ...rawMe, entitlements: myLeaveAllocations } : rawMe;
-  const annualBalance = me ? getLeaveBalance(me, requests, "ANNUAL") : null;
+  const annualBalance = me ? getLeaveBalance(me, isReal ? realRequests : requests, "ANNUAL") : null;
   // Real employee: the real Supabase holiday calendar, so this live preview
   // matches what the server will actually compute — display only, still not
   // used to authorize anything client-side.
@@ -4749,7 +4867,7 @@ function EmployeeRequestDetailPage() {
   const selfNavId = useSelfServiceNavId();
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
-  const { requests, deleteRequest } = useStore();
+  const { requests, realRequests, deleteRequest, deleteRealRequest, isRemoteEmployee } = useStore();
   const { session } = useAuth();
   const navigate = useNavigate();
 
@@ -4758,7 +4876,11 @@ function EmployeeRequestDetailPage() {
   const [deleting, setDeleting] = useState(false);
 
   const justSubmitted = location.state?.justSubmitted === true;
-  const request = requests.find((r) => r.id === id);
+  // Real employee: real requests (Phase 6B-7) — a real request's UUID is
+  // never found in the local `requests`, which previously navigated away
+  // before Delete was ever reachable except from the post-submission card.
+  const isReal = isRemoteEmployee(session!.user.id);
+  const request = (isReal ? realRequests : requests).find((r) => r.id === id);
 
   if (!request) return <Navigate to="/employee/requests" replace />;
 
@@ -4776,8 +4898,12 @@ function EmployeeRequestDetailPage() {
 
   async function handleDelete() {
     setDeleting(true);
-    await new Promise((r) => setTimeout(r, 500));
-    const res = deleteRequest(request!.id, session!.user.id);
+    const res = isReal
+      ? await deleteRealRequest(request!.id)
+      : await (async () => {
+          await new Promise((r) => setTimeout(r, 500));
+          return deleteRequest(request!.id, session!.user.id);
+        })();
     if (!res.ok) {
       setDeleteErr(res.error ?? "This request could not be deleted.");
       setDeleting(false);
@@ -4961,13 +5087,19 @@ function EmployeeRequestDetailPage() {
 function EmployeeRequestsPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, realRequests, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
   const location = useLocation();
 
   const justDeleted = location.state?.justDeleted === true;
 
-  const myRequests = [...requests.filter((r) => r.employeeId === session!.user.id)].sort(
+  // Real employee: realRequests (Phase 6B-7) — already scoped by RLS to
+  // exactly what this session can see, but the existing employeeId filter
+  // below is kept anyway since a Manager/TM/GM/HR viewer's own realRequests
+  // set can be broader than just their own requests.
+  const isReal = isRemoteEmployee(session!.user.id);
+  const sourceRequests = isReal ? realRequests : requests;
+  const myRequests = [...sourceRequests.filter((r) => r.employeeId === session!.user.id)].sort(
     (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
   );
 
@@ -5138,14 +5270,19 @@ function EmployeeNotificationsPage() {
 
 function ManagerDashboardPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, realRequests, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
+
+  // Real approver (Phase 6B-8): realRequests, already scoped by RLS
+  // (requests_select_approver — any stage) to exactly what this session may
+  // see. Demo approver: unchanged, local requests only.
+  const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
 
   // Visible: every request this approver sits in the chain of, at any stage.
   // For the technical manager and the GM that is the whole organisation,
   // because they are in every chain. Actionable: only what is waiting on them
   // right now.
-  const myRequests = requests.filter((r) => involvesApprover(r, session!.user.id));
+  const myRequests = sourceRequests.filter((r) => involvesApprover(r, session!.user.id));
   const pending = myRequests.filter((r) => awaitsDecisionBy(r, session!.user.id));
   const recentPending = [...pending]
     .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
@@ -5634,8 +5771,15 @@ function OrganizationPage() {
 
 function ManagerRequestsPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, realRequests, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
+
+  // Real approver (Manager/TM/GM): realRequests is already scoped by RLS
+  // (requests_select_approver — any stage, any role — or requests_select_hr)
+  // to exactly what this session may see; involvesApprover below is the
+  // same existing pure filter demo data already uses, re-applied on top for
+  // consistency, not as the security boundary (Phase 6B-7).
+  const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
 
   const [filterEmployee, setFilterEmployee] = useState("");
   const [filterManager, setFilterManager] = useState("");
@@ -5650,7 +5794,7 @@ function ManagerRequestsPage() {
   // filter would offer exactly one, always-selected option and is skipped.
   const showManagerFilter = session!.user.role === "TECH_MANAGER" || session!.user.role === "GM";
 
-  const myRequests = [...requests.filter((r) => involvesApprover(r, session!.user.id))].sort(
+  const myRequests = [...sourceRequests.filter((r) => involvesApprover(r, session!.user.id))].sort(
     (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
   );
 
@@ -5853,7 +5997,7 @@ function ManagerRequestsPage() {
 
 function ManagerRequestDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { requests, approveRequest, rejectRequest } = useStore();
+  const { requests, realRequests, approveRequest, rejectRequest, decideRealRequest, isRemoteEmployee } = useStore();
   const { session } = useAuth();
   const navigate = useNavigate();
 
@@ -5863,20 +6007,31 @@ function ManagerRequestDetailPage() {
   const [actionErr, setActionErr] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const request = requests.find((r) => r.id === id);
+  // Real approver: realRequests (Phase 6B-7); Approve/Reject call
+  // decide_request via decideRealRequest (Phase 6B-8) — entirely separate
+  // from approveRequest/rejectRequest, which stay local/demo-only.
+  const isReal = isRemoteEmployee(session!.user.id);
+  const request = (isReal ? realRequests : requests).find((r) => r.id === id);
   if (!request) return <Navigate to="/manager/requests" replace />;
   // An approver may open any request they appear in, but may only act on it
   // while it is standing at their own stage.
   if (!involvesApprover(request, session!.user.id)) return <Navigate to="/access-denied" replace />;
 
   // The action buttons appear only for the approver whose stage is live. A
-  // later approver can read the request while it is still upstream of them, but
-  // cannot decide it out of turn.
+  // later approver can read the request while it is still upstream of them,
+  // but cannot decide it out of turn — same rule for real and demo data;
+  // decide_request re-enforces this identically server-side.
   const isPending = awaitsDecisionBy(request, session!.user.id);
   const waitingOn = currentStep(request);
 
   async function handleApprove() {
     setLoading(true);
+    if (isReal) {
+      const res = await decideRealRequest(request!.id, "APPROVE");
+      if (!res.ok) setActionErr(res.error ?? "Could not record your decision.");
+      setLoading(false);
+      return;
+    }
     await new Promise((r) => setTimeout(r, 500));
     const res = approveRequest(request!.id, session!.user.id);
     if (!res.ok) setActionErr(res.error ?? "Could not record your decision.");
@@ -5889,6 +6044,14 @@ function ManagerRequestDetailPage() {
       return;
     }
     setLoading(true);
+    if (isReal) {
+      const res = await decideRealRequest(request!.id, "REJECT", rejectComment.trim());
+      if (!res.ok) setActionErr(res.error ?? "Could not record your decision.");
+      setShowRejectModal(false);
+      setRejectComment("");
+      setLoading(false);
+      return;
+    }
     await new Promise((r) => setTimeout(r, 500));
     const res = rejectRequest(request!.id, session!.user.id, rejectComment.trim());
     if (!res.ok) setActionErr(res.error ?? "Could not record your decision.");
@@ -6973,8 +7136,14 @@ function HREmployeesPage() {
 // ─── H04 — HR Requests ────────────────────────────────────────────────────────
 
 function HRRequestsPage() {
-  const { requests, employees } = useStore();
+  const { session } = useAuth();
+  const { requests, realRequests, employees, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
+
+  // Real HR: realRequests (Phase 6B-7) — request_approvals RLS's is_hr()
+  // grants a real HR session every request, matching requests_select_hr.
+  // Demo HR: unchanged, local requests only — never merged with real data.
+  const requests_ = isRemoteEmployee(session!.user.id) ? realRequests : requests;
 
   const [filterManager, setFilterManager] = useState("");
   const [filterEmployee, setFilterEmployee] = useState("");
@@ -6985,11 +7154,11 @@ function HRRequestsPage() {
 
   // Build unique manager list from actual request data (preserves historical)
   const allManagers = Array.from(
-    new Map(requests.map((r) => [r.managerId, r.managerName])).entries()
+    new Map(requests_.map((r) => [r.managerId, r.managerName])).entries()
   ).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
 
   const allEmployees = Array.from(
-    new Map(requests.map((r) => [r.employeeId, r.employeeName])).entries()
+    new Map(requests_.map((r) => [r.employeeId, r.employeeName])).entries()
   ).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
 
   const hasFilters = !!(filterManager || filterEmployee || filterType || filterStatus || filterFrom || filterTo);
@@ -6998,7 +7167,7 @@ function HRRequestsPage() {
     setFilterManager(""); setFilterEmployee(""); setFilterType(""); setFilterStatus(""); setFilterFrom(""); setFilterTo("");
   }
 
-  const filtered = requests.filter((r) => {
+  const filtered = requests_.filter((r) => {
     if (filterManager && r.managerId !== filterManager) return false;
     if (filterEmployee && r.employeeId !== filterEmployee) return false;
     if (filterType && r.type !== filterType) return false;
@@ -7037,7 +7206,7 @@ function HRRequestsPage() {
         </div>
         {hasFilters && (
           <div className="mt-3 flex items-center gap-2">
-            <p className="text-xs text-muted-foreground">{filtered.length} of {requests.length} requests</p>
+            <p className="text-xs text-muted-foreground">{filtered.length} of {requests_.length} requests</p>
             <button onClick={clearFilters} className="text-xs text-primary hover:underline flex items-center gap-1">
               <X className="h-3 w-3" /> Clear Filters
             </button>
@@ -7088,10 +7257,12 @@ function HRRequestsPage() {
 
 function HRRequestDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { requests, employees } = useStore();
+  const { session } = useAuth();
+  const { requests, realRequests, employees, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
 
-  const request = requests.find((r) => r.id === id);
+  // Real HR: realRequests (Phase 6B-7); demo HR: unchanged, local only.
+  const request = (isRemoteEmployee(session!.user.id) ? realRequests : requests).find((r) => r.id === id);
 
   if (!request) {
     return (
