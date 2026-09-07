@@ -333,7 +333,11 @@ export interface ApprovalStep {
  * technical manager, then the general manager.
  *
  * Four rules keep the chain sane in a small organisation:
- *   - the requester is never their own approver,
+ *   - the requester is never their own approver — an explicit, standalone
+ *     check (not merely a side effect of the seen-dedup below), mirroring
+ *     the identical explicit check in build_approval_chain (Postgres);
+ *     non-negotiable — see that migration for the investigation this was
+ *     hardened by,
  *   - a person who appears twice (a department manager whose own direct
  *     manager IS the technical manager, for example) is only asked once,
  *   - HR never routes through the Technical Manager tier at all (Phase
@@ -377,7 +381,12 @@ export function buildApprovalChain(
   const seen = new Set<string>([employeeId]);
 
   for (const { person } of candidates) {
-    if (!person || person.status !== "ACTIVE" || seen.has(person.id)) continue;
+    if (!person || person.status !== "ACTIVE") continue;
+    // Non-negotiable: a requester must never appear as an approver in their
+    // own request. Explicit and independent of the seen-dedup below — see
+    // build_approval_chain (Postgres) for the identical guard.
+    if (person.id === employeeId) continue;
+    if (seen.has(person.id)) continue;
     seen.add(person.id);
     // Label the step by the approver's real role, not by the slot they happen
     // to fill. A department manager reports to the technical manager, so that
