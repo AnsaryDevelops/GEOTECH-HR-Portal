@@ -332,17 +332,25 @@ export interface ApprovalStep {
  * Builds the approval chain for one employee: direct manager, then the
  * technical manager, then the general manager.
  *
- * Three rules keep the chain sane in a small organisation:
+ * Four rules keep the chain sane in a small organisation:
  *   - the requester is never their own approver,
  *   - a person who appears twice (a department manager whose own direct
- *     manager IS the technical manager, for example) is only asked once, and
+ *     manager IS the technical manager, for example) is only asked once,
  *   - HR never routes through the Technical Manager tier at all (Phase
  *     6A.1) — HR's direct manager is always the General Manager
  *     (employees[].managerId, the same single source of truth every other
  *     approver relationship uses), so an HR requester's chain omits the
  *     Technical Manager candidate outright rather than relying on the
  *     already-seen dedup above, which only catches the exact same PERSON
- *     appearing twice, not "this tier does not apply to this requester."
+ *     appearing twice, not "this tier does not apply to this requester,"
+ *     and
+ *   - the General Manager is always the final stage (Phase 6B-4 fix,
+ *     mirrors build_approval_chain in Postgres) — dedup-by-person alone
+ *     cannot express "the chain has already reached the top of the
+ *     hierarchy": when a requester's direct manager already IS the General
+ *     Manager, the loop used to keep going and could still append a
+ *     distinct Technical Manager as a stage AFTER the GM. Once a candidate
+ *     whose actual role is GM is added, the loop stops.
  *
  * Inactive approvers are dropped rather than blocking the request; the caller
  * decides what to do with an empty chain.
@@ -383,6 +391,9 @@ export function buildApprovalChain(
       approverName: person.name,
       status: "PENDING",
     });
+    // General Manager is always the final stage — see the SQL mirror
+    // (build_approval_chain) for the exact same rule and reasoning.
+    if (person.role === "GM") break;
   }
 
   return chain;

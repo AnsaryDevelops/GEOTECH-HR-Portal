@@ -72,6 +72,8 @@ import type {
   LeaveTypeRecord,
   UserRole,
   DepartmentRecord,
+  RequestStatus,
+  RequestType,
 } from "../lib/store";
 import {
   signIn as authSignIn,
@@ -1671,6 +1673,21 @@ interface StoreContextValue {
     employeeId: string, employeeName: string,
     data: { leaveType: string; startDate: string; endDate: string; reason?: string }
   ) => { ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> };
+  /**
+   * Real employees only (Phase 6B-4) — calls submit_leave_request directly;
+   * entirely separate from createLeaveRequest, which stays local/demo-only
+   * and untouched. Identity, manager, approval chain, working-day count,
+   * overlap, and balance are all derived/validated server-side; the client
+   * passes only leave_type_id, start_date, end_date, and an optional reason.
+   * The returned RequestRecord is not written into store.requests — it is
+   * for the immediate post-submission display only (see LeaveRequestPage).
+   */
+  submitRealLeaveRequest: (data: {
+    leaveTypeId: string;
+    startDate: string;
+    endDate: string;
+    reason?: string;
+  }) => Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }>;
   createMissionRequest: (
     employeeId: string, employeeName: string,
     data: { startDate: string; startTime: string; endDate: string; endTime: string; location: string; purpose: string }
@@ -1791,6 +1808,81 @@ function mapProfileRowToEmployeeProfile(row: {
 
 const PROFILE_SELECT_COLUMNS =
   "id, employee_code, first_name, last_name, name, position, department, department_id, departments(name), email, phone, status, role, manager_id, permission_minutes_per_month";
+
+// Phase 6B-4 — real Leave submission only. Maps one Supabase `request_approvals`
+// row onto the existing ApprovalStep shape, and one `requests` row (as
+// returned by submit_leave_request, RETURNS requests — every column) plus
+// its approval rows onto the existing RequestRecord shape, so the existing
+// display components (RequestTimeline, requestLabel, requestPeriod,
+// stageLabel, ...) work unchanged against a real, Supabase-created request.
+// Used only for the immediate post-submission result — this does not read
+// back into store.requests and is not a general Requests-list adapter (see
+// LeaveRequestPage's own limitation note).
+function mapApprovalRowToApprovalStep(row: {
+  stage: number;
+  role: string;
+  title: string;
+  approver_id: string;
+  approver_name: string;
+  status: string;
+  decided_at: string | null;
+  comment: string | null;
+}): ApprovalStep {
+  return {
+    stage: row.stage,
+    role: row.role as UserRole,
+    title: row.title,
+    approverId: row.approver_id,
+    approverName: row.approver_name,
+    status: row.status as RequestStatus,
+    decidedAt: row.decided_at ?? undefined,
+    comment: row.comment ?? undefined,
+  };
+}
+
+function mapRequestRowToRequestRecord(
+  row: {
+    id: string;
+    request_number: string;
+    employee_id: string;
+    employee_name: string;
+    manager_id: string | null;
+    manager_name: string | null;
+    type: string;
+    status: string;
+    submitted_at: string;
+    leave_type_name: string | null;
+    balance_key: string | null;
+    working_days: number | null;
+    start_date: string | null;
+    end_date: string | null;
+    reason: string | null;
+    decided_at: string | null;
+    decision_comment: string | null;
+  },
+  approvals: ApprovalStep[]
+): RequestRecord {
+  return {
+    id: row.id,
+    requestNumber: row.request_number,
+    employeeId: row.employee_id,
+    employeeName: row.employee_name,
+    managerId: row.manager_id ?? "",
+    managerName: row.manager_name ?? "",
+    approvals,
+    type: row.type as RequestType,
+    status: row.status as RequestStatus,
+    submittedAt: row.submitted_at,
+    leaveType: row.leave_type_name ?? undefined,
+    balanceKey: (row.balance_key as BalanceKey | null) ?? null,
+    workingDays: row.working_days ?? undefined,
+    startDate: row.start_date ?? undefined,
+    endDate: row.end_date ?? undefined,
+    reason: row.reason ?? undefined,
+    decidedAt: row.decided_at ?? undefined,
+    decisionComment: row.decision_comment ?? undefined,
+  };
+}
 
 const StoreCtx = createContext<StoreContextValue | null>(null);
 
@@ -2064,6 +2156,49 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
 
   function mutate(updater: (prev: StoreData) => StoreData) {
     setStore(updater);
+  }
+
+  // Phase 6B-4 — real employees only. Entirely separate from
+  // createLeaveRequest below (untouched, demo/local-only forever going
+  // forward): a real employee is never required to exist in
+  // store.employees to submit Leave, which is exactly what previously
+  // produced the incorrect "Your account is inactive" message for a real
+  // account (a pre-existing Phase 6A gap in the local-only path, not fixed
+  // by patching that path — fixed by not routing real submissions through
+  // it at all). submit_leave_request derives employee identity from
+  // auth.uid(), and is itself authoritative for active-profile, active
+  // manager, leave-type validity, date order, working-day count, overlap,
+  // and balance — none of that is duplicated or re-checked here.
+  async function submitRealLeaveRequest(data: {
+    leaveTypeId: string;
+    startDate: string;
+    endDate: string;
+    reason?: string;
+  }): Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+
+    const { data: row, error } = await supabase.rpc("submit_leave_request", {
+      p_leave_type_id: data.leaveTypeId,
+      p_start_date: data.startDate,
+      p_end_date: data.endDate,
+      p_reason: data.reason ?? null,
+    });
+    if (error) return { ok: false, error: error.message };
+
+    // The request already committed server-side at this point — a failure
+    // reading back its approval rows is not a submission failure, just an
+    // incomplete chain in the immediate confirmation view.
+    const { data: approvalRows, error: approvalError } = await supabase
+      .from("request_approvals")
+      .select("stage, role, title, approver_id, approver_name, status, decided_at, comment")
+      .eq("request_id", row.id)
+      .order("stage");
+
+    const request = mapRequestRowToRequestRecord(
+      row,
+      approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
+    );
+    return { ok: true, request };
   }
 
   function createLeaveRequest(
@@ -2825,7 +2960,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       attendance: store.attendance, holidays: store.holidays, remoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
       departments, approvalRouting,
-      createLeaveRequest, createMissionRequest, createPermissionRequest,
+      createLeaveRequest, submitRealLeaveRequest, createMissionRequest, createPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
       approveRequest, rejectRequest, deleteRequest, markNotificationRead, markAllNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
@@ -3741,11 +3876,23 @@ function NewRequestPage() {
 function LeaveRequestPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
-  const { requests, leaveTypes, employees, holidays, createLeaveRequest, myLeaveAllocations, isRemoteEmployee } = useStore();
+  const {
+    requests, leaveTypes, remoteLeaveTypes, employees, holidays, remoteHolidays,
+    createLeaveRequest, submitRealLeaveRequest, myLeaveAllocations, isRemoteEmployee,
+  } = useStore();
   const navigate = useNavigate();
 
+  const isReal = isRemoteEmployee(session!.user.id);
   const manager = getManagerForEmployee(employees, session!.user.id);
-  const chain = buildApprovalChain(employees, session!.user.id);
+  // Preview only — the real RPC path derives the actual chain server-side
+  // from company_approval_routing, independent of this. Restricted to real
+  // employees for a real requester so the Technical Manager/General Manager
+  // role-scan inside buildApprovalChain cannot resolve to a demo person
+  // ahead of the real one (both are always "active," and the local demo
+  // roster is always present in the merged list) — a pre-existing display-only
+  // gap, exposed by enabling real submission, fixed here for the preview only.
+  const chainEmployees = isReal ? employees.filter((e) => isRemoteEmployee(e.id)) : employees;
+  const chain = buildApprovalChain(chainEmployees, session!.user.id);
 
   const [leaveType, setLeaveType] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -3753,17 +3900,26 @@ function LeaveRequestPage() {
   const [reason, setReason] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  // Real submission only — the Supabase-created request/approval chain for
+  // the immediate confirmation view. Never written into store.requests (the
+  // Supabase row is the sole source of truth); My Requests/Request Detail
+  // cannot show it yet, since the Requests read path is a later checkpoint.
+  const [realResult, setRealResult] = useState<RequestRecord | null>(null);
 
   // Same ANNUAL balance shown elsewhere (getLeaveBalance) — never adjusted by
   // the current, unsaved form. requestedDays is a separate, live figure from
   // the existing countWorkingDays(), computed from whatever dates are typed in.
   // Real employee: entitlements comes from the real leave_allocations fetch
   // (Phase 6B-3) instead of the hardcoded 0/0 every remote profile otherwise
-  // carries — display only; submission below is untouched.
+  // carries — display only; the RPC is authoritative for the actual balance
+  // check at submission time, never this client-side figure.
   const rawMe = employees.find((e) => e.id === session!.user.id) ?? null;
-  const me = rawMe && isRemoteEmployee(session!.user.id) ? { ...rawMe, entitlements: myLeaveAllocations } : rawMe;
+  const me = rawMe && isReal ? { ...rawMe, entitlements: myLeaveAllocations } : rawMe;
   const annualBalance = me ? getLeaveBalance(me, requests, "ANNUAL") : null;
-  const requestedDays = countWorkingDays(startDate, endDate, holidays);
+  // Real employee: the real Supabase holiday calendar, so this live preview
+  // matches what the server will actually compute — display only, still not
+  // used to authorize anything client-side.
+  const requestedDays = countWorkingDays(startDate, endDate, isReal ? remoteHolidays : holidays);
 
   function clearErr(field: string) {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
@@ -3781,8 +3937,48 @@ function LeaveRequestPage() {
     );
   }
 
+  // Real employees only. Minimal, UX-only checks — required fields and date
+  // order — mirroring the same checks validateLeaveFields makes before its
+  // own overlap/balance checks (deliberately not duplicated here: those are
+  // server-authoritative inside submit_leave_request, never re-implemented
+  // client-side). Leave type validity is not re-checked either — the
+  // dropdown below only ever offers ACTIVE Supabase leave types, so an
+  // inactive/invalid one cannot be selected in the first place; the RPC's
+  // own check is the real backstop.
+  function validateRealLeaveFields(): Record<string, string> {
+    const errs: Record<string, string> = {};
+    if (!leaveType) errs.leaveType = "Leave Type is required.";
+    if (!startDate) errs.startDate = "Start Date is required.";
+    if (!endDate) errs.endDate = "End Date is required.";
+    if (startDate && endDate && endDate < startDate) {
+      errs.endDate = "End Date cannot be before Start Date.";
+    }
+    return errs;
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+
+    if (isReal) {
+      const errs = validateRealLeaveFields();
+      if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+      setErrors({});
+      setSubmitting(true);
+      const result = await submitRealLeaveRequest({
+        leaveTypeId: leaveType,
+        startDate, endDate,
+        reason: reason.trim() || undefined,
+      });
+      setSubmitting(false);
+      if (!result.ok) {
+        setErrors({ _form: result.error });
+        return;
+      }
+      setRealResult(result.request);
+      return;
+    }
+
+    // Unchanged demo path.
     const errs = validateLeaveFields(
       { leaveType, startDate, endDate },
       requests.filter((r) => r.employeeId === session!.user.id),
@@ -3805,6 +4001,45 @@ function LeaveRequestPage() {
     navigate(`/employee/requests/${result.request.id}`, {
       replace: true, state: { justSubmitted: true },
     });
+  }
+
+  if (realResult) {
+    return (
+      <DashboardShell activeNavId={selfNavId} pageTitle="Request Leave">
+        <div className="max-w-2xl">
+          <Card>
+            <Alert variant="success">
+              <p className="font-medium text-green-800 text-sm">Request submitted successfully</p>
+              <p className="text-sm text-green-700 mt-0.5">
+                Your request has been sent to your direct manager for approval.
+              </p>
+            </Alert>
+            <div className="rounded-[10px] border border-border divide-y divide-border mt-4">
+              {[
+                { label: "Request Number", value: realResult.requestNumber },
+                { label: "Leave Type", value: requestLabel(realResult) },
+                { label: "Period", value: requestPeriod(realResult) },
+                { label: "Status", value: realResult.status },
+              ].map(({ label, value }) => (
+                <div key={label} className="flex items-center gap-4 px-4 py-2.5">
+                  <p className="text-xs text-muted-foreground w-32 flex-shrink-0">{label}</p>
+                  <p className="text-sm font-medium">{value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-5">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+                Approval chain
+              </p>
+              <RequestTimeline request={realResult} />
+            </div>
+            <div className="mt-5">
+              <Button variant="primary" onClick={() => navigate("/employee/requests")}>Back to My Requests</Button>
+            </div>
+          </Card>
+        </div>
+      </DashboardShell>
+    );
   }
 
   return (
@@ -3839,9 +4074,13 @@ function LeaveRequestPage() {
                 error={errors.leaveType}
               >
                 <option value="">Select Leave Type</option>
-                {leaveTypes.filter((lt) => lt.status === "ACTIVE").map((lt) => (
-                  <option key={lt.id} value={lt.name}>{lt.name}</option>
-                ))}
+                {isReal
+                  ? remoteLeaveTypes.filter((lt) => lt.status === "ACTIVE").map((lt) => (
+                      <option key={lt.id} value={lt.id}>{lt.name}</option>
+                    ))
+                  : leaveTypes.filter((lt) => lt.status === "ACTIVE").map((lt) => (
+                      <option key={lt.id} value={lt.name}>{lt.name}</option>
+                    ))}
               </Select>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <DatePicker
