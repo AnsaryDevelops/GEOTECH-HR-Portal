@@ -1480,6 +1480,7 @@ interface AppShellProps {
   activeNavId?: string;
   pageTitle?: string;
   notificationCount?: number;
+  onNotificationsClick?: () => void;
   accessory?: React.ReactNode;
   onNavigate?: (id: string) => void;
   onLogout?: () => void;
@@ -1491,6 +1492,7 @@ export function AppShell({
   activeNavId,
   pageTitle,
   notificationCount = 0,
+  onNotificationsClick,
   accessory,
   onNavigate,
   onLogout,
@@ -1540,6 +1542,7 @@ export function AppShell({
           userName={user.name}
           role={user.role}
           notificationCount={notificationCount}
+          onNotificationsClick={onNotificationsClick}
         accessory={accessory}
           onMenuClick={() => setMobileSidebarOpen(true)}
         />
@@ -3599,6 +3602,7 @@ function DashboardShell({ activeNavId, pageTitle, children }: DashboardShellProp
       activeNavId={activeNavId}
       pageTitle={pageTitle}
       notificationCount={unreadCount}
+      onNotificationsClick={() => handleNavigate("notifications")}
       accessory={<PermissionChip />}
       onNavigate={handleNavigate}
       onLogout={handleLogout}
