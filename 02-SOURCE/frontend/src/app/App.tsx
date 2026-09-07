@@ -3209,14 +3209,19 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     if (isRemoteEmployee(id)) {
       if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
 
-      // set_approval_routing (a later phase) is the only safe way to
-      // promote someone to Technical Manager/General Manager — a raw
-      // profiles UPDATE bypasses its ordering guarantees against the
-      // partial-unique-index/company_approval_routing invariants.
+      // setApprovalRouting/set_approval_routing (Phase 6A.1, HR Settings →
+      // Approval Routing) is the only safe way to promote someone to
+      // Technical Manager/General Manager — a raw profiles UPDATE here would
+      // bypass its ordering guarantees against the partial-unique-index
+      // (profiles_one_active_tech_manager/profiles_one_active_gm) and would
+      // leave company_approval_routing — the actual source build_approval_chain
+      // reads — out of sync with profiles.role. Both singleton indexes and
+      // the routing RPC already exist and are already in active use; this is
+      // a deliberate redirect to that dedicated flow, not a missing feature.
       if ((data.role === "TECH_MANAGER" || data.role === "GM") && target.role !== data.role) {
         return {
           ok: false,
-          error: "Promoting to Technical Manager or General Manager isn't available yet — this requires Approval Routing, a later phase.",
+          error: "Promoting to Technical Manager or General Manager isn't done from Edit Employee — use Approval Routing in HR Settings instead, which keeps the role and the approval chain in sync.",
         };
       }
       if (data.managerId && !isRemoteEmployee(data.managerId)) {
@@ -6869,9 +6874,20 @@ function EmployeeForm({
         <option value="">Select Role</option>
         <option value="EMPLOYEE">Employee</option>
         <option value="MANAGER">Direct Manager</option>
-        <option value="TECH_MANAGER">Technical Manager</option>
-        <option value="GM">General Manager</option>
-        <option value="HR">HR</option>
+        {/* Technical Manager/General Manager are singleton roles assigned via
+            Approval Routing (HR Settings), not created here — createEmployee
+            rejects them; only offer what Add can actually create. Editing an
+            existing employee still needs every role: HR is a plain, safe
+            profiles.role reassignment (no singleton constraint), and
+            TECH_MANAGER/GM are shown so selecting one surfaces the redirect
+            to Approval Routing rather than silently vanishing as an option. */}
+        {isEdit && (
+          <>
+            <option value="TECH_MANAGER">Technical Manager</option>
+            <option value="GM">General Manager</option>
+            <option value="HR">HR</option>
+          </>
+        )}
       </Select>
       {!isEdit && initial.role === "MANAGER" && (
         <TeamMembersField
