@@ -1639,7 +1639,10 @@ interface StoreContextValue {
   requests: RequestRecord[];
   notifications: NotificationRecord[];
   employees: EmployeeProfile[];
+  /** Local/demo leave type catalog — unconditionally `store.leaveTypes`. Leave submission reads this, unchanged since before Phase 6B-1. */
   leaveTypes: LeaveTypeRecord[];
+  /** Real, Supabase-backed leave types (Phase 6B-1) — see supabase/migrations/20260906130200_leave_types.sql. Only HRSettingsPage's management UI reads this, for a real HR session. */
+  remoteLeaveTypes: LeaveTypeRecord[];
   attendance: AttendanceRecord[];
   holidays: HolidayRecord[];
   /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. */
@@ -1671,8 +1674,18 @@ interface StoreContextValue {
   updateEmployee: (id: string, data: Partial<EmployeeProfile>) => Promise<{ ok: boolean; error?: string }>;
   /** True once `id` is known to be a real Supabase-backed profile, not a local demo employee. */
   isRemoteEmployee: (id: string) => boolean;
-  createLeaveType: (name: string, balanceKey: BalanceKey | null) => LeaveTypeRecord;
-  updateLeaveType: (id: string, updates: Partial<LeaveTypeRecord>) => void;
+  /**
+   * Real path is HR-only (leave_types_insert_hr RLS re-enforces server-side);
+   * demo path is unchanged from before Phase 6B-1. `leaveType` is present
+   * only on the demo path's success, for callers that used the old
+   * synchronous return value.
+   */
+  createLeaveType: (
+    name: string,
+    balanceKey: BalanceKey | null
+  ) => Promise<{ ok: boolean; error?: string; leaveType?: LeaveTypeRecord }>;
+  /** Real path is HR-only (leave_types_update_hr RLS re-enforces server-side); demo path unchanged. */
+  updateLeaveType: (id: string, updates: Partial<LeaveTypeRecord>) => Promise<{ ok: boolean; error?: string }>;
   /** HR-only; RLS (departments_insert_hr) re-enforces this server-side. */
   createDepartment: (name: string) => Promise<{ ok: boolean; error?: string }>;
   /** HR-only; covers rename and archive/reactivate. RLS (departments_update_hr) re-enforces server-side. */
@@ -1838,6 +1851,43 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }
   }, []);
 
+  // Real, Supabase-backed leave types (Phase 6B-1) — exposed as its own
+  // context field, deliberately separate from `leaveTypes` (which stays
+  // exactly `store.leaveTypes`, unconditionally local). Leave submission
+  // (createLeaveRequest/validateLeaveFields) is NOT part of this phase — it
+  // still reads and validates against the local list for every employee,
+  // real or demo, exactly as before. Only HRSettingsPage's management UI
+  // reads this new field, and only for a real HR session — see
+  // HRSettingsPage's own real-vs-demo switch.
+  const [remoteLeaveTypes, setRemoteLeaveTypes] = useState<LeaveTypeRecord[]>([]);
+
+  const fetchRemoteLeaveTypes = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setRemoteLeaveTypes([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("leave_types")
+        .select("id, name, status, balance_key")
+        .order("name");
+      if (error || !data) {
+        setRemoteLeaveTypes([]);
+        return;
+      }
+      setRemoteLeaveTypes(
+        data.map((row) => ({
+          id: row.id,
+          name: row.name,
+          status: row.status,
+          balanceKey: row.balance_key,
+        }))
+      );
+    } catch {
+      setRemoteLeaveTypes([]);
+    }
+  }, []);
+
   // Re-fetch whenever the signed-in session changes (login/logout/switching
   // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
   // session is actually allowed to see (self/reports/own-manager for a
@@ -1845,13 +1895,15 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // gets an empty result back (no Supabase session token to attach, so the
   // request runs as `anon`, which has zero grants on `profiles`), which
   // fetchRemoteEmployees already treats as "no remote employees" — never a
-  // crash. Departments RLS (departments_select_active) similarly returns only
-  // ACTIVE rows to a non-HR session, all rows to HR.
+  // crash. Departments RLS (departments_select_active) and leave_types RLS
+  // (leave_types_select_active) similarly return only ACTIVE rows to a
+  // non-HR session, all rows to HR.
   useEffect(() => {
     fetchRemoteEmployees();
     fetchDepartments();
     fetchApprovalRouting();
-  }, [session, fetchRemoteEmployees, fetchDepartments, fetchApprovalRouting]);
+    fetchRemoteLeaveTypes();
+  }, [session, fetchRemoteEmployees, fetchDepartments, fetchApprovalRouting, fetchRemoteLeaveTypes]);
 
   // The one list every page already reads via useStore().employees — local
   // demo roster first, then real Supabase employees. No id collision is
@@ -2420,15 +2472,78 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return { ok: true };
   }
 
-  function createLeaveType(name: string, balanceKey: BalanceKey | null): LeaveTypeRecord {
+  // Real path is HR-only (leave_types_insert_hr RLS policy re-checks this
+  // server-side too — the frontend is never the security boundary). Unlike
+  // departments' name uniqueness, leave_types.name is a plain UNIQUE
+  // constraint across every status, not a partial index scoped to ACTIVE —
+  // so the duplicate check here matches against every fetched row,
+  // including inactive ones, not just active ones.
+  async function createLeaveType(
+    name: string,
+    balanceKey: BalanceKey | null
+  ): Promise<{ ok: boolean; error?: string; leaveType?: LeaveTypeRecord }> {
+    const trimmed = name.trim();
+    if (!trimmed) return { ok: false, error: "Name is required." };
+
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      if (remoteLeaveTypes.some((lt) => lt.name.toLowerCase() === trimmed.toLowerCase())) {
+        return { ok: false, error: "A leave type with this name already exists." };
+      }
+      const { error } = await supabase
+        .from("leave_types")
+        .insert({ name: trimmed, balance_key: balanceKey });
+      if (error) {
+        return {
+          ok: false,
+          error: error.code === "23505" ? "A leave type with this name already exists." : error.message,
+        };
+      }
+      await fetchRemoteLeaveTypes();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
     const id = `lt-${store.nextLeaveTypeSeq}`;
-    const lt: LeaveTypeRecord = { id, name: name.trim(), status: "ACTIVE", balanceKey };
+    const lt: LeaveTypeRecord = { id, name: trimmed, status: "ACTIVE", balanceKey };
     mutate((p) => ({ ...p, leaveTypes: [...p.leaveTypes, lt], nextLeaveTypeSeq: p.nextLeaveTypeSeq + 1 }));
-    return lt;
+    return { ok: true, leaveType: lt };
   }
 
-  function updateLeaveType(id: string, updates: Partial<LeaveTypeRecord>) {
+  // Covers rename (name/balanceKey) and activate/deactivate (status) —
+  // real path HR-only, leave_types_update_hr RLS policy re-checks
+  // server-side. No DELETE anywhere, matching leave_types' RLS exactly.
+  async function updateLeaveType(
+    id: string,
+    updates: Partial<LeaveTypeRecord>
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      if (updates.name !== undefined) {
+        const trimmed = updates.name.trim();
+        if (!trimmed) return { ok: false, error: "Name is required." };
+        if (remoteLeaveTypes.some((lt) => lt.id !== id && lt.name.toLowerCase() === trimmed.toLowerCase())) {
+          return { ok: false, error: "A leave type with this name already exists." };
+        }
+      }
+      const patch: Record<string, unknown> = {};
+      if (updates.name !== undefined) patch.name = updates.name.trim();
+      if (updates.balanceKey !== undefined) patch.balance_key = updates.balanceKey;
+      if (updates.status !== undefined) patch.status = updates.status;
+      const { error } = await supabase.from("leave_types").update(patch).eq("id", id);
+      if (error) {
+        return {
+          ok: false,
+          error: error.code === "23505" ? "A leave type with this name already exists." : error.message,
+        };
+      }
+      await fetchRemoteLeaveTypes();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
     mutate((p) => ({ ...p, leaveTypes: p.leaveTypes.map((lt) => lt.id === id ? { ...lt, ...updates } : lt) }));
+    return { ok: true };
   }
 
   // HR-only (departments_insert_hr RLS policy re-checks this server-side too
@@ -2493,7 +2608,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   return (
     <StoreCtx.Provider value={{
       requests: store.requests, notifications: store.notifications,
-      employees, leaveTypes: store.leaveTypes,
+      employees, leaveTypes: store.leaveTypes, remoteLeaveTypes,
       attendance: store.attendance, holidays: store.holidays,
       departments, approvalRouting,
       createLeaveRequest, createMissionRequest, createPermissionRequest,
@@ -6502,7 +6617,13 @@ function HRAttendancePage() {
 }
 
 function HRSettingsPage() {
-  const { leaveTypes, createLeaveType, updateLeaveType } = useStore();
+  const { session } = useAuth();
+  const { leaveTypes: localLeaveTypes, remoteLeaveTypes, createLeaveType, updateLeaveType, isRemoteEmployee } = useStore();
+  // TESTHR01-style real HR sees/manages the real Supabase catalog; a local
+  // demo HR account (e.g. Riley Chen) keeps managing the existing local
+  // list, completely unaffected — same isolation rule as every other
+  // Phase 6A/6A.1 real-vs-demo split.
+  const leaveTypes = session && isRemoteEmployee(session.user.id) ? remoteLeaveTypes : localLeaveTypes;
 
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
@@ -6513,26 +6634,40 @@ function HRSettingsPage() {
   const [editError, setEditError] = useState("");
   const [newBalanceKey, setNewBalanceKey] = useState<BalanceKey | "">("");
   const [editBalanceKey, setEditBalanceKey] = useState<BalanceKey | "">("");
+  const [saving, setSaving] = useState(false);
+  const [toggleError, setToggleError] = useState("");
 
-  function handleAdd() {
+  async function handleAdd() {
     const trimmed = newName.trim();
     if (!trimmed) { setAddError("Name is required."); return; }
     if (leaveTypes.some((lt) => lt.name.toLowerCase() === trimmed.toLowerCase())) {
       setAddError("A leave type with this name already exists."); return;
     }
-    createLeaveType(trimmed, newBalanceKey || null);
+    setSaving(true);
+    const res = await createLeaveType(trimmed, newBalanceKey || null);
+    setSaving(false);
+    if (!res.ok) { setAddError(res.error ?? "Could not add that leave type."); return; }
     setNewName(""); setNewBalanceKey(""); setShowAdd(false); setAddError("");
   }
 
-  function handleEdit() {
+  async function handleEdit() {
     if (!editTarget) return;
     const trimmed = editName.trim();
     if (!trimmed) { setEditError("Name is required."); return; }
     if (leaveTypes.some((lt) => lt.name.toLowerCase() === trimmed.toLowerCase() && lt.id !== editTarget.id)) {
       setEditError("A leave type with this name already exists."); return;
     }
-    updateLeaveType(editTarget.id, { name: trimmed, balanceKey: editBalanceKey || null });
+    setSaving(true);
+    const res = await updateLeaveType(editTarget.id, { name: trimmed, balanceKey: editBalanceKey || null });
+    setSaving(false);
+    if (!res.ok) { setEditError(res.error ?? "Could not save changes."); return; }
     setEditTarget(null); setEditName(""); setEditBalanceKey(""); setEditError("");
+  }
+
+  async function handleToggleStatus(lt: LeaveTypeRecord) {
+    setToggleError("");
+    const res = await updateLeaveType(lt.id, { status: lt.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" });
+    if (!res.ok) setToggleError(res.error ?? "Could not update that leave type.");
   }
 
   return (
@@ -6572,12 +6707,14 @@ function HRSettingsPage() {
                 </Select>
               </div>
               <div className="flex gap-2 pt-0.5">
-                <Button variant="primary" onClick={handleAdd}>Save</Button>
+                <Button variant="primary" onClick={handleAdd} loading={saving}>Save</Button>
                 <Button variant="secondary" onClick={() => setShowAdd(false)}>Cancel</Button>
               </div>
             </div>
           </Card>
         )}
+
+        {toggleError && <Alert variant="error" className="mb-4">{toggleError}</Alert>}
 
         <Card padding={false}>
           {leaveTypes.length === 0 ? (
@@ -6610,7 +6747,7 @@ function HRSettingsPage() {
                           </Select>
                         </div>
                         <div className="flex gap-2 pt-0.5">
-                          <Button variant="primary" onClick={handleEdit}>Save</Button>
+                          <Button variant="primary" onClick={handleEdit} loading={saving}>Save</Button>
                           <Button variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
                         </div>
                       </div>
@@ -6635,7 +6772,7 @@ function HRSettingsPage() {
                         Edit
                       </button>
                       <button
-                        onClick={() => updateLeaveType(lt.id, { status: lt.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" })}
+                        onClick={() => handleToggleStatus(lt)}
                         className="text-xs text-muted-foreground hover:text-foreground hover:underline"
                       >
                         {lt.status === "ACTIVE" ? "Deactivate" : "Activate"}
