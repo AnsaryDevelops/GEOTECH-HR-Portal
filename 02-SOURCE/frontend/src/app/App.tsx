@@ -85,6 +85,7 @@ import {
   updateHRUserCredential,
   subscribeToAuthChanges,
   provisionEmployeeAccount,
+  changePassword,
 } from "../lib/auth";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
 import companyLogoSrc from "../imports/GEO_Egypt_LOGO-01.png";
@@ -8384,9 +8385,107 @@ function ApprovalRoutingSection() {
 // those fields as editable, for any role including HR.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Real Supabase accounts only — password change goes straight through
+// Supabase Auth (see changePassword() in lib/auth.ts). Demo/local accounts
+// never render this section; their passwords stay in the existing seeded
+// local credential store, untouched.
+function ChangePasswordCard() {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [success, setSuccess] = useState(false);
+
+  async function handleSubmit() {
+    if (submitting) return;
+    setSuccess(false);
+
+    const errs: Record<string, string> = {};
+    if (!currentPassword) errs.currentPassword = "Current password is required.";
+    if (!newPassword) errs.newPassword = "New password is required.";
+    if (!confirmPassword) errs.confirmPassword = "Please confirm your new password.";
+    if (newPassword && confirmPassword && newPassword !== confirmPassword) {
+      errs.confirmPassword = "New password and confirmation do not match.";
+    }
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
+      return;
+    }
+
+    setSubmitting(true);
+    const result = await changePassword(currentPassword, newPassword);
+    setSubmitting(false);
+
+    if (!result.ok) {
+      const field =
+        result.error === "CURRENT_PASSWORD_INCORRECT"
+          ? "currentPassword"
+          : result.error === "SAME_AS_CURRENT" || result.error === "WEAK_PASSWORD"
+          ? "newPassword"
+          : "_form";
+      setErrors({ [field]: result.message });
+      return;
+    }
+
+    setErrors({});
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setSuccess(true);
+  }
+
+  return (
+    <Card className="mt-6">
+      <p className="text-sm font-medium mb-1">Security</p>
+      <p className="text-xs text-muted-foreground mb-4">
+        Change the password used to sign in to this account.
+      </p>
+      {success && (
+        <Alert variant="success" className="mb-4">
+          Password changed successfully.
+        </Alert>
+      )}
+      {errors._form && (
+        <Alert variant="error" className="mb-4">
+          {errors._form}
+        </Alert>
+      )}
+      <div className="flex flex-col gap-4 max-w-md">
+        <PasswordInput
+          label="Current Password *"
+          value={currentPassword}
+          onChange={(e) => { setCurrentPassword(e.target.value); setSuccess(false); }}
+          error={errors.currentPassword}
+          autoComplete="current-password"
+        />
+        <PasswordInput
+          label="New Password *"
+          value={newPassword}
+          onChange={(e) => { setNewPassword(e.target.value); setSuccess(false); }}
+          error={errors.newPassword}
+          autoComplete="new-password"
+        />
+        <PasswordInput
+          label="Confirm New Password *"
+          value={confirmPassword}
+          onChange={(e) => { setConfirmPassword(e.target.value); setSuccess(false); }}
+          error={errors.confirmPassword}
+          autoComplete="new-password"
+        />
+        <div>
+          <Button variant="primary" onClick={handleSubmit} loading={submitting} disabled={submitting}>
+            {submitting ? "Changing…" : "Change Password"}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function MyProfilePage() {
   const { session } = useAuth();
-  const { employees, updateEmployee } = useStore();
+  const { employees, updateEmployee, isRemoteEmployee } = useStore();
   const me = employees.find((e) => e.id === session!.user.id) ?? null;
 
   const [firstName, setFirstName] = useState(me?.firstName ?? "");
@@ -8499,6 +8598,8 @@ function MyProfilePage() {
             <Input label="Direct Manager" value={manager?.name ?? "None"} disabled />
           </div>
         </Card>
+
+        {isRemoteEmployee(me.id) && <ChangePasswordCard />}
       </div>
     </DashboardShell>
   );

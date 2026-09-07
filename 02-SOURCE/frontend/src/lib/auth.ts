@@ -544,6 +544,73 @@ export function getDemoPassword(): string {
   return DEMO_PASSWORD
 }
 
+// ─── Password change (real Supabase accounts only) ────────────────────────────
+// Demo/local accounts never reach this — see createHRUserCredential/
+// updateHRUserCredential above for how their passwords are managed instead.
+
+export type ChangePasswordError =
+  | 'CURRENT_PASSWORD_INCORRECT'
+  | 'SAME_AS_CURRENT'
+  | 'WEAK_PASSWORD'
+  | 'NOT_SUPPORTED'
+  | 'SYSTEM_ERROR'
+
+export type ChangePasswordResult = { ok: true } | { ok: false; error: ChangePasswordError; message: string }
+
+/**
+ * Changes the signed-in real Supabase user's own password.
+ *
+ * The current password is verified by re-authenticating with it via
+ * signInWithPassword — Supabase Auth has no separate "verify password"
+ * endpoint, and this is its documented pattern for confirming a password
+ * before a sensitive change. Only on success does updateUser() apply the new
+ * one. Neither password is ever sent anywhere but supabase-js's own Auth
+ * calls: not to a custom RPC, not into any table, not logged.
+ *
+ * Gated on sessionSource === 'supabase' (not just `supabase` being
+ * configured) so this can never run against a local demo session even if
+ * one happens to be live in the same browser tab.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<ChangePasswordResult> {
+  if (!supabase || sessionSource !== 'supabase') {
+    return { ok: false, error: 'NOT_SUPPORTED', message: 'Password changes are only available for real accounts.' }
+  }
+
+  if (currentPassword === newPassword) {
+    return { ok: false, error: 'SAME_AS_CURRENT', message: 'New password must be different from your current password.' }
+  }
+
+  try {
+    const { data: userData, error: userError } = await supabase.auth.getUser()
+    if (userError || !userData.user?.email) {
+      return { ok: false, error: 'SYSTEM_ERROR', message: 'Your session could not be verified. Please sign in again.' }
+    }
+
+    const { error: verifyError } = await supabase.auth.signInWithPassword({
+      email: userData.user.email,
+      password: currentPassword,
+    })
+    if (verifyError) {
+      return { ok: false, error: 'CURRENT_PASSWORD_INCORRECT', message: 'Current password is incorrect.' }
+    }
+
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword })
+    if (updateError) {
+      const message = /password/i.test(updateError.message)
+        ? updateError.message
+        : 'Could not update your password. Please choose a different password and try again.'
+      return { ok: false, error: 'WEAK_PASSWORD', message }
+    }
+
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'SYSTEM_ERROR', message: 'Could not reach the server. Please try again.' }
+  }
+}
+
 // ─── Real employee provisioning (Supabase) ────────────────────────────────────
 
 export interface ProvisionEmployeeInput {
