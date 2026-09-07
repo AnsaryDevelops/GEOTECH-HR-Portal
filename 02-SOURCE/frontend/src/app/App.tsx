@@ -1654,6 +1654,16 @@ interface StoreContextValue {
   /** Real, Supabase-backed leave types (Phase 6B-1) — see supabase/migrations/20260906130200_leave_types.sql. Only HRSettingsPage's management UI reads this, for a real HR session. */
   remoteLeaveTypes: LeaveTypeRecord[];
   attendance: AttendanceRecord[];
+  /**
+   * Real, Supabase-backed attendance (Phase 6B-10) — see
+   * supabase/migrations/20260906130900_attendance.sql. RLS
+   * (attendance_select_self_or_hr) scopes this to the caller's own records
+   * for a real employee, or every record for real HR — the same single
+   * fetch serves both MyCalendarWidget/useMyBalances and HRAttendancePage.
+   * Deliberately separate from `attendance`, which stays exactly
+   * `store.attendance`, unconditionally local/demo.
+   */
+  realAttendance: AttendanceRecord[];
   /** Local/demo public holidays — unconditionally `store.holidays`. Leave/Permission submission and the calendar widget read this, unchanged since before Phase 6B-2. */
   holidays: HolidayRecord[];
   /** Real, Supabase-backed public holidays (Phase 6B-2) — see supabase/migrations/20260906130500_public_holidays.sql. Only HolidaysSection's management UI reads this, for a real HR session. */
@@ -1739,6 +1749,21 @@ interface StoreContextValue {
   ) => Promise<{ ok: boolean; error?: string }>;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: (userId: string) => void;
+  /**
+   * Real, Supabase-backed notifications visible to the signed-in session
+   * (Phase 6B-9) — see fetchRealNotifications. Deliberately separate from
+   * `notifications`, which stays exactly `store.notifications`,
+   * unconditionally local/demo. Created exclusively by the transactional
+   * RPCs (submit_leave_request, submit_mission_request,
+   * submit_permission_request, decide_request) as part of the same
+   * transaction that submits or decides a request — never inserted from
+   * the client, so a refetch or a browser refresh can never duplicate one.
+   */
+  realNotifications: NotificationRecord[];
+  /** Real users only — flips one notification's `read` column via RLS's own-or-HR UPDATE grant. */
+  markRealNotificationRead: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Real users only — flips every one of the caller's own notifications to read, same isolation rule as markAllNotificationsRead. */
+  markAllRealNotificationsRead: () => Promise<{ ok: boolean; error?: string }>;
   // HR-only operations. EMPLOYEE/MANAGER creation goes through the real
   // Supabase provisioning path (provisionEmployeeAccount / Edge Function) —
   // see StoreProvider.createEmployee — so both are async now; every other
@@ -1794,11 +1819,19 @@ interface StoreContextValue {
     minutes: number;
     reason?: string;
   }) => Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }>;
+  /**
+   * Real path is HR-only (attendance_insert_hr/attendance_update_hr RLS
+   * re-enforces server-side); demo path unchanged since before Phase
+   * 6B-10. One record per employee per day either way — the real path
+   * upserts on the table's own UNIQUE (employee_id, date) constraint,
+   * matching the existing "re-entering a day corrects it" demo behavior.
+   */
   recordAttendance: (
     data: { employeeId: string; date: string; checkIn?: string; checkOut?: string; note?: string },
     recordedBy: string
-  ) => { ok: boolean; error?: string };
-  deleteAttendance: (id: string) => void;
+  ) => Promise<{ ok: boolean; error?: string }>;
+  /** Real path is HR-only (attendance_delete_hr RLS re-enforces server-side); demo path unchanged. */
+  deleteAttendance: (id: string) => Promise<void>;
   /**
    * Real path is HR-only (public_holidays_insert_hr RLS re-enforces
    * server-side); demo path unchanged since before Phase 6B-2. Public
@@ -1946,6 +1979,60 @@ function mapRequestRowToRequestRecord(
     permissionMinutes: row.permission_minutes ?? undefined,
     decidedAt: row.decided_at ?? undefined,
     decisionComment: row.decision_comment ?? undefined,
+  };
+}
+
+// Phase 6B-9 — maps one Supabase `notifications` row onto the existing
+// NotificationRecord shape 1:1 (same four-value type union the table's own
+// CHECK constraint enforces) so EmployeeNotificationsPage/
+// ManagerNotificationsPage/HRNotificationsPage/DashboardShell's unread badge
+// work unchanged against real data. request_id is nullable on the table in
+// principle, but every INSERT the transactional RPCs perform always sets
+// it — the fallback is defensive only, never expected to trigger.
+function mapNotificationRowToNotificationRecord(row: {
+  id: string;
+  user_id: string;
+  type: string;
+  request_id: string | null;
+  message: string;
+  read: boolean;
+  created_at: string;
+}): NotificationRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    type: row.type as NotificationRecord["type"],
+    requestId: row.request_id ?? "",
+    message: row.message,
+    read: row.read,
+    createdAt: row.created_at,
+  };
+}
+
+// Phase 6B-10 — maps one Supabase `attendance` row onto the existing
+// AttendanceRecord shape 1:1. check_in/check_out come back from PostgREST as
+// "HH:MM:SS" (Postgres TIME) — sliced to "HH:MM" to match the demo shape
+// exactly (minutesOfDay/lateMinutes/earlyLeaveMinutes and every display site
+// already assume "HH:MM").
+function mapAttendanceRowToAttendanceRecord(row: {
+  id: string;
+  employee_id: string;
+  date: string;
+  check_in: string | null;
+  check_out: string | null;
+  note: string | null;
+  recorded_by: string;
+  recorded_at: string;
+}): AttendanceRecord {
+  return {
+    id: row.id,
+    employeeId: row.employee_id,
+    date: row.date,
+    checkIn: row.check_in ? row.check_in.slice(0, 5) : undefined,
+    checkOut: row.check_out ? row.check_out.slice(0, 5) : undefined,
+    note: row.note ?? undefined,
+    recordedBy: row.recorded_by,
+    recordedAt: row.recorded_at,
   };
 }
 
@@ -2216,6 +2303,94 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }
   }, [session]);
 
+  // Phase 6B-9 — the real notifications visible to the signed-in session,
+  // exposed as its own context field, deliberately separate from
+  // `notifications` (which stays exactly `store.notifications`,
+  // unconditionally local/demo). RLS alone scopes what a plain SELECT
+  // returns (own, or every notification for HR) — no client-side WHERE
+  // clause needed. Every row is created exclusively inside submit_leave_request/
+  // submit_mission_request/submit_permission_request/decide_request, as part
+  // of the same transaction that submits or decides a request — never from
+  // this client, so a refetch (including this one, on session change) can
+  // never create a duplicate; it only ever re-reads existing rows.
+  const [realNotifications, setRealNotifications] = useState<NotificationRecord[]>([]);
+
+  const fetchRealNotifications = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !session) {
+      setRealNotifications([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("notifications")
+        .select("id, user_id, type, request_id, message, read, created_at")
+        .order("created_at", { ascending: false });
+      if (error || !data) {
+        setRealNotifications([]);
+        return;
+      }
+      setRealNotifications(data.map(mapNotificationRowToNotificationRecord));
+    } catch {
+      setRealNotifications([]);
+    }
+  }, [session]);
+
+  // Real users only (Phase 6B-9) — UPDATE (read) is the only column grant
+  // notifications_update_own_or_hr allows; RLS re-enforces "own row, or HR"
+  // server-side regardless of what id is passed.
+  async function markRealNotificationRead(id: string): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    const { error } = await supabase.from("notifications").update({ read: true }).eq("id", id);
+    if (error) return { ok: false, error: error.message };
+    await fetchRealNotifications();
+    return { ok: true };
+  }
+
+  // Real users only — always scoped to the caller's own notifications via
+  // auth.uid(), same isolation rule as the demo markAllNotificationsRead
+  // (which is likewise only ever called with the caller's own session id).
+  async function markAllRealNotificationsRead(): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase || !session) return { ok: false, error: "Supabase is not configured in this environment." };
+    const { error } = await supabase
+      .from("notifications")
+      .update({ read: true })
+      .eq("user_id", session.user.id);
+    if (error) return { ok: false, error: error.message };
+    await fetchRealNotifications();
+    return { ok: true };
+  }
+
+  // Phase 6B-10 — the real attendance visible to the signed-in session,
+  // exposed as its own context field, deliberately separate from
+  // `attendance` (which stays exactly `store.attendance`, unconditionally
+  // local/demo). RLS alone scopes what a plain SELECT returns
+  // (attendance_select_self_or_hr: own rows for a real employee, every row
+  // for real HR) — no client-side WHERE clause needed. The same fetch and
+  // field serve both a real employee's own calendar/permission-balance and
+  // real HR's management page, exactly like realRequests serves both My
+  // Requests and Manager Requests.
+  const [realAttendance, setRealAttendance] = useState<AttendanceRecord[]>([]);
+
+  const fetchRealAttendance = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !session) {
+      setRealAttendance([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("attendance")
+        .select("id, employee_id, date, check_in, check_out, note, recorded_by, recorded_at")
+        .order("date", { ascending: false });
+      if (error || !data) {
+        setRealAttendance([]);
+        return;
+      }
+      setRealAttendance(data.map(mapAttendanceRowToAttendanceRecord));
+    } catch {
+      setRealAttendance([]);
+    }
+  }, [session]);
+
   // Re-fetch whenever the signed-in session changes (login/logout/switching
   // accounts) — RLS (Phase 3) scopes what comes back to whatever the current
   // session is actually allowed to see (self/reports/own-manager for a
@@ -2243,6 +2418,8 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     fetchRemoteHolidays();
     fetchMyLeaveAllocations();
     fetchRealRequests();
+    fetchRealNotifications();
+    fetchRealAttendance();
   }, [
     session,
     fetchRemoteEmployees,
@@ -2252,6 +2429,8 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     fetchRemoteHolidays,
     fetchMyLeaveAllocations,
     fetchRealRequests,
+    fetchRealNotifications,
+    fetchRealAttendance,
   ]);
 
   // The one list every page already reads via useStore().employees — local
@@ -2313,8 +2492,11 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
     );
     // Keep realRequests in sync so My Requests/calendar reflect this
-    // submission without requiring a manual refresh (Phase 6B-7).
+    // submission without requiring a manual refresh (Phase 6B-7). The RPC
+    // already inserted a REQUEST_SUBMITTED notification for the first-stage
+    // approver in the same transaction (Phase 6B-9) — this only re-reads it.
     await fetchRealRequests();
+    await fetchRealNotifications();
     return { ok: true, request };
   }
 
@@ -2417,8 +2599,11 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
     );
     // Keep realRequests in sync so My Requests/calendar reflect this
-    // submission without requiring a manual refresh (Phase 6B-7).
+    // submission without requiring a manual refresh (Phase 6B-7). The RPC
+    // already inserted a REQUEST_SUBMITTED notification for the first-stage
+    // approver in the same transaction (Phase 6B-9) — this only re-reads it.
     await fetchRealRequests();
+    await fetchRealNotifications();
     return { ok: true, request };
   }
 
@@ -2504,8 +2689,11 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
     );
     // Keep realRequests in sync so My Requests/calendar reflect this
-    // submission without requiring a manual refresh (Phase 6B-7).
+    // submission without requiring a manual refresh (Phase 6B-7). The RPC
+    // already inserted a REQUEST_SUBMITTED notification for the Direct
+    // Manager in the same transaction (Phase 6B-9) — this only re-reads it.
     await fetchRealRequests();
+    await fetchRealNotifications();
     return { ok: true, request };
   }
 
@@ -2574,10 +2762,16 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // Entered from the fingerprint device. Lateness is charged automatically, so
   // there is no separate "deduct" action to forget to run.
 
-  function recordAttendance(
+  // Real path is HR-only (attendance_insert_hr/attendance_update_hr RLS
+  // re-enforces server-side, same as every other HR-authored real write in
+  // this app — see createHoliday/deleteHoliday for the identical branching
+  // shape). Upserts on the table's own UNIQUE (employee_id, date)
+  // constraint, matching the existing "re-entering a day corrects it" demo
+  // behavior exactly — no separate update-vs-insert branch needed.
+  async function recordAttendance(
     data: { employeeId: string; date: string; checkIn?: string; checkOut?: string; note?: string },
     recordedBy: string
-  ): { ok: boolean; error?: string } {
+  ): Promise<{ ok: boolean; error?: string }> {
     if (!data.employeeId) return { ok: false, error: "Choose an employee." };
     if (!data.date) return { ok: false, error: "Choose a date." };
     if (!data.checkIn && !data.checkOut) {
@@ -2586,8 +2780,30 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     if (data.checkIn && data.checkOut && minutesOfDay(data.checkOut) <= minutesOfDay(data.checkIn)) {
       return { ok: false, error: "Check-out must be after check-in." };
     }
-    if (!store.employees.some((e) => e.id === data.employeeId)) {
+    // employees (not store.employees) — the picker on HRAttendancePage
+    // already offers both demo and real employees together.
+    if (!employees.some((e) => e.id === data.employeeId)) {
       return { ok: false, error: "Employee not found." };
+    }
+
+    if (session && isRemoteEmployee(recordedBy)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      const { error } = await supabase
+        .from("attendance")
+        .upsert(
+          {
+            employee_id: data.employeeId,
+            date: data.date,
+            check_in: data.checkIn || null,
+            check_out: data.checkOut || null,
+            note: data.note?.trim() || null,
+            recorded_by: recordedBy,
+          },
+          { onConflict: "employee_id,date" }
+        );
+      if (error) return { ok: false, error: error.message };
+      await fetchRealAttendance();
+      return { ok: true };
     }
 
     const recordedAt = new Date().toISOString();
@@ -2614,7 +2830,13 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return { ok: true };
   }
 
-  function deleteAttendance(id: string) {
+  async function deleteAttendance(id: string): Promise<void> {
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return;
+      const { error } = await supabase.from("attendance").delete().eq("id", id);
+      if (!error) await fetchRealAttendance();
+      return;
+    }
     mutate((p) => ({ ...p, attendance: p.attendance.filter((a) => a.id !== id) }));
   }
 
@@ -2816,7 +3038,11 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     const { error } = await supabase.rpc("delete_own_request", { p_request_id: requestId });
     if (error) return { ok: false, error: error.message };
     // Keep realRequests in sync so it no longer appears (Phase 6B-7).
+    // request_id has ON DELETE CASCADE on notifications, so any notification
+    // tied to this request is already gone server-side — this just re-reads
+    // that (Phase 6B-9).
     await fetchRealRequests();
+    await fetchRealNotifications();
     return { ok: true };
   }
 
@@ -2842,8 +3068,13 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     // Keep realRequests in sync — moves off this approver's Pending Requests,
     // and (for an APPROVE that advances the chain) becomes visible to the
     // next approver's own next fetch, immediately reflected here for this
-    // session's own detail/timeline view.
+    // session's own detail/timeline view. decide_request already inserted
+    // the relevant notification(s) — REJECTED to the requester, or
+    // ADVANCED+SUBMITTED to requester+next approver, or APPROVED to the
+    // requester on final GM approval — in the same transaction (Phase
+    // 6B-9); this only re-reads them.
     await fetchRealRequests();
+    await fetchRealNotifications();
     return { ok: true };
   }
 
@@ -3194,7 +3425,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     <StoreCtx.Provider value={{
       requests: store.requests, realRequests, notifications: store.notifications,
       employees, leaveTypes: store.leaveTypes, remoteLeaveTypes,
-      attendance: store.attendance, holidays: store.holidays, remoteHolidays,
+      attendance: store.attendance, realAttendance, holidays: store.holidays, remoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
       departments, approvalRouting,
       createLeaveRequest, submitRealLeaveRequest,
@@ -3202,6 +3433,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       createPermissionRequest, submitRealPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
       approveRequest, rejectRequest, deleteRequest, deleteRealRequest, decideRealRequest, markNotificationRead, markAllNotificationsRead,
+      realNotifications, markRealNotificationRead, markAllRealNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
       createDepartment, updateDepartment, setApprovalRouting,
     }}>
@@ -3335,10 +3567,13 @@ function useSelfServiceNavId(): string {
 
 function DashboardShell({ activeNavId, pageTitle, children }: DashboardShellProps) {
   const { session, logout } = useAuth();
-  const { notifications } = useStore();
+  const { notifications, realNotifications, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
 
-  const unreadCount = notifications.filter(
+  // Real user: realNotifications (Phase 6B-9), already scoped by RLS to the
+  // caller's own rows. Demo user: unchanged, local notifications only.
+  const sourceNotifications = isRemoteEmployee(session!.user.id) ? realNotifications : notifications;
+  const unreadCount = sourceNotifications.filter(
     (n) => n.userId === session!.user.id && !n.read
   ).length;
 
@@ -3755,7 +3990,7 @@ function ApproverInfo({ chain }: { chain: ApprovalStep[] }) {
 /** Everything the signed-in employee needs to know about their own allowances. */
 function useMyBalances() {
   const { session } = useAuth();
-  const { requests, realRequests, employees, attendance, myLeaveAllocations, isRemoteEmployee } = useStore();
+  const { requests, realRequests, employees, attendance, realAttendance, myLeaveAllocations, isRemoteEmployee } = useStore();
 
   const me = employees.find((e) => e.id === session!.user.id) ?? null;
   const month = currentMonthKey(new Date());
@@ -3769,15 +4004,20 @@ function useMyBalances() {
   // realRequests already contains only requests they are authorized to see,
   // and for an employee that is exactly their own — so approved/pending
   // real Leave and Permission requests now count toward used/held.
-  // attendance stays local for everyone until Attendance is migrated.
+  // attendance source is likewise swapped (Phase 6B-10) — realAttendance is
+  // already scoped by RLS to this employee's own records, so lateness/early-
+  // departure now correctly charges against the real monthly permission
+  // allowance, exactly matching what get_permission_balance already computes
+  // server-side (submit_permission_request's own balance check).
   const leaveMe = isReal ? { ...me, entitlements: myLeaveAllocations } : me;
   const myRequests = isReal ? realRequests : requests;
+  const myAttendance = isReal ? realAttendance : attendance;
 
   return {
     me,
     month,
     leave: leaveMe ? getAllLeaveBalances(leaveMe, myRequests) : [],
-    permission: me ? getPermissionBalance(me, myRequests, attendance, month) : null,
+    permission: me ? getPermissionBalance(me, myRequests, myAttendance, month) : null,
   };
 }
 
@@ -3921,15 +4161,16 @@ const CALENDAR_LEGEND: { state: CalendarDayState; label: string; dot: string }[]
  */
 function MyCalendarWidget() {
   const { session } = useAuth();
-  const { requests, realRequests, attendance, holidays, remoteHolidays, isRemoteEmployee } = useStore();
+  const { requests, realRequests, attendance, realAttendance, holidays, remoteHolidays, isRemoteEmployee } = useStore();
 
   const employeeId = session!.user.id;
   const isReal = isRemoteEmployee(employeeId);
   // Real employee: real requests + the real public-holiday calendar
-  // (Phase 6B-7); demo employee: unchanged local sources. Attendance stays
-  // local for everyone until Attendance is migrated.
+  // (Phase 6B-7) + real attendance (Phase 6B-10); demo employee: unchanged
+  // local sources throughout.
   const myRequests = isReal ? realRequests : requests;
   const myHolidays = isReal ? remoteHolidays : holidays;
+  const myAttendance = isReal ? realAttendance : attendance;
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
@@ -3949,7 +4190,7 @@ function MyCalendarWidget() {
   function dayState(dateStr: string, weekday: number): CalendarDayState {
     if (approvedAnnualLeave.some((r) => dateStr >= r.startDate && dateStr <= r.endDate)) return "LEAVE";
     if (myHolidays.some((h) => h.date === dateStr)) return "HOLIDAY";
-    const record = attendance.find((a) => a.employeeId === employeeId && a.date === dateStr);
+    const record = myAttendance.find((a) => a.employeeId === employeeId && a.date === dateStr);
     if (record?.checkIn && record?.checkOut) return "PRESENT";
     if (WEEKEND_DAYS.includes(weekday)) return "WEEKEND";
     return "NORMAL";
@@ -5188,16 +5429,25 @@ function EmployeeRequestsPage() {
 
 function EmployeeNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead, markAllNotificationsRead } = useStore();
+  const {
+    notifications, realNotifications, markNotificationRead, markAllNotificationsRead,
+    markRealNotificationRead, markAllRealNotificationsRead, isRemoteEmployee,
+  } = useStore();
   const navigate = useNavigate();
 
-  const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
+  // Real employee: realNotifications (Phase 6B-9), already scoped by RLS to
+  // the caller's own rows; the employeeId filter below is kept anyway for
+  // consistency with every other real-data page in this app.
+  const isReal = isRemoteEmployee(session!.user.id);
+  const sourceNotifications = isReal ? realNotifications : notifications;
+  const myNotifs = [...sourceNotifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
   const hasUnread = myNotifs.some((n) => !n.read);
 
   function handleClick(n: NotificationRecord) {
-    markNotificationRead(n.id);
+    if (isReal) markRealNotificationRead(n.id);
+    else markNotificationRead(n.id);
     navigate(`/employee/requests/${n.requestId}`);
   }
 
@@ -5208,7 +5458,7 @@ function EmployeeNotificationsPage() {
           <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
           {myNotifs.length > 0 && (
             <button
-              onClick={() => markAllNotificationsRead(session!.user.id)}
+              onClick={() => (isReal ? markAllRealNotificationsRead() : markAllNotificationsRead(session!.user.id))}
               disabled={!hasUnread}
               className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
             >
@@ -6238,17 +6488,38 @@ function ManagerRequestDetailPage() {
 
 function ManagerNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead, markAllNotificationsRead } = useStore();
+  const {
+    requests, realRequests, notifications, realNotifications,
+    markNotificationRead, markAllNotificationsRead,
+    markRealNotificationRead, markAllRealNotificationsRead, isRemoteEmployee,
+  } = useStore();
   const navigate = useNavigate();
 
-  const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
+  const isReal = isRemoteEmployee(session!.user.id);
+  const sourceRequests = isReal ? realRequests : requests;
+  const sourceNotifications = isReal ? realNotifications : notifications;
+  const myNotifs = [...sourceNotifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
   const hasUnread = myNotifs.some((n) => !n.read);
 
+  // A Manager/TM/GM is also an employee who can submit their own requests —
+  // a notification about the recipient's OWN request (e.g. "your request
+  // was approved") must open the employee-facing detail page (ownership-
+  // gated), not the approver-facing one (involvesApprover-gated): the
+  // recipient is never an approver on their own request (self-approval is
+  // excluded from the chain), so routing every notification to
+  // /manager/requests/:id sent an approver-only guard a request the viewer
+  // does not appear in as an approver, producing Access Denied.
   function handleClick(n: NotificationRecord) {
-    markNotificationRead(n.id);
-    navigate(`/manager/requests/${n.requestId}`);
+    if (isReal) markRealNotificationRead(n.id);
+    else markNotificationRead(n.id);
+    const request = sourceRequests.find((r) => r.id === n.requestId);
+    if (request && request.employeeId === session!.user.id) {
+      navigate(`/employee/requests/${n.requestId}`);
+    } else {
+      navigate(`/manager/requests/${n.requestId}`);
+    }
   }
 
   return (
@@ -6258,7 +6529,7 @@ function ManagerNotificationsPage() {
           <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
           {myNotifs.length > 0 && (
             <button
-              onClick={() => markAllNotificationsRead(session!.user.id)}
+              onClick={() => (isReal ? markAllRealNotificationsRead() : markAllNotificationsRead(session!.user.id))}
               disabled={!hasUnread}
               className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
             >
@@ -7367,10 +7638,15 @@ function HRRequestDetailPage() {
 
 function HRNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead, markAllNotificationsRead } = useStore();
+  const {
+    notifications, realNotifications, markNotificationRead, markAllNotificationsRead,
+    markRealNotificationRead, markAllRealNotificationsRead, isRemoteEmployee,
+  } = useStore();
   const navigate = useNavigate();
 
-  const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
+  const isReal = isRemoteEmployee(session!.user.id);
+  const sourceNotifications = isReal ? realNotifications : notifications;
+  const myNotifs = [...sourceNotifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
   const hasUnread = myNotifs.some((n) => !n.read);
@@ -7382,7 +7658,7 @@ function HRNotificationsPage() {
           <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
           {myNotifs.length > 0 && (
             <button
-              onClick={() => markAllNotificationsRead(session!.user.id)}
+              onClick={() => (isReal ? markAllRealNotificationsRead() : markAllNotificationsRead(session!.user.id))}
               disabled={!hasUnread}
               className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
             >
@@ -7407,7 +7683,11 @@ function HRNotificationsPage() {
                   "flex items-start gap-4 rounded-[10px] border p-4 text-left transition-colors w-full",
                   n.read ? "border-border bg-card hover:bg-muted/30" : "border-primary/20 bg-accent/50 hover:bg-accent"
                 )}
-                onClick={() => { markNotificationRead(n.id); navigate(`/hr/requests/${n.requestId}`); }}
+                onClick={() => {
+                  if (isReal) markRealNotificationRead(n.id);
+                  else markNotificationRead(n.id);
+                  navigate(`/hr/requests/${n.requestId}`);
+                }}
               >
                 <div className="mt-0.5 h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
                   <BellRing className="h-4 w-4 text-primary" />
@@ -7434,8 +7714,16 @@ function HRNotificationsPage() {
 // there is nothing to remember to run afterwards.
 
 function HRAttendancePage() {
-  const { employees, attendance, requests, recordAttendance, deleteAttendance } = useStore();
+  const { employees, attendance, realAttendance, requests, realRequests, recordAttendance, deleteAttendance, isRemoteEmployee } = useStore();
   const { session } = useAuth();
+
+  // Real HR: realAttendance (Phase 6B-10), already scoped by RLS to every
+  // employee's records (attendance_select_self_or_hr's is_hr() branch).
+  // Demo HR: unchanged, local records only. sourceRequests follows the same
+  // split, for the per-row permission-balance figure below.
+  const isReal = isRemoteEmployee(session!.user.id);
+  const sourceAttendance = isReal ? realAttendance : attendance;
+  const sourceRequests = isReal ? realRequests : requests;
 
   const today = toISODate(new Date());
   const [employeeId, setEmployeeId] = useState("");
@@ -7445,13 +7733,16 @@ function HRAttendancePage() {
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
+  const [saving, setSaving] = useState(false);
   const [filterMonth, setFilterMonth] = useState(currentMonthKey(new Date()));
 
   const activeEmployees = employees.filter((e) => e.status === "ACTIVE");
 
-  function handleSave() {
+  async function handleSave() {
     setSaved("");
-    const res = recordAttendance({ employeeId, date, checkIn, checkOut, note }, session!.user.id);
+    setSaving(true);
+    const res = await recordAttendance({ employeeId, date, checkIn, checkOut, note }, session!.user.id);
+    setSaving(false);
     if (!res.ok) { setError(res.error ?? "Could not save."); return; }
     const who = employees.find((e) => e.id === employeeId)?.name ?? employeeId;
     setError("");
@@ -7459,11 +7750,11 @@ function HRAttendancePage() {
     setCheckIn(""); setCheckOut(""); setNote("");
   }
 
-  const rows = [...attendance]
+  const rows = [...sourceAttendance]
     .filter((a) => monthKey(a.date) === filterMonth)
     .sort((a, b) => b.date.localeCompare(a.date) || a.employeeId.localeCompare(b.employeeId));
 
-  const months = Array.from(new Set([filterMonth, ...attendance.map((a) => monthKey(a.date))])).sort().reverse();
+  const months = Array.from(new Set([filterMonth, ...sourceAttendance.map((a) => monthKey(a.date))])).sort().reverse();
 
   return (
     <DashboardShell activeNavId="attendance" pageTitle="Attendance">
@@ -7492,7 +7783,7 @@ function HRAttendancePage() {
           {error && <Alert variant="error">{error}</Alert>}
           {saved && <Alert variant="success">{saved}</Alert>}
           <div>
-            <Button variant="primary" onClick={handleSave}>Save Record</Button>
+            <Button variant="primary" onClick={handleSave} loading={saving}>Save Record</Button>
           </div>
         </div>
       </Card>
@@ -7531,7 +7822,7 @@ function HRAttendancePage() {
                 {rows.map((a) => {
                   const emp = employees.find((e) => e.id === a.employeeId);
                   const charged = lateMinutes(a) + earlyLeaveMinutes(a);
-                  const balance = emp ? getPermissionBalance(emp, requests, attendance, monthKey(a.date)) : null;
+                  const balance = emp ? getPermissionBalance(emp, sourceRequests, sourceAttendance, monthKey(a.date)) : null;
                   return (
                     <tr key={a.id} className="border-b border-border/60 last:border-0">
                       <td className="px-4 py-3 whitespace-nowrap tabular-nums">{fmtDate(a.date)}</td>
