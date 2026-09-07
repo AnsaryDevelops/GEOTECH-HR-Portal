@@ -1692,11 +1692,31 @@ interface StoreContextValue {
     employeeId: string, employeeName: string,
     data: { startDate: string; startTime: string; endDate: string; endTime: string; location: string; purpose: string }
   ) => { ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> };
+  /**
+   * Real employees only (Phase 6B-5) — calls submit_mission_request
+   * directly; entirely separate from createMissionRequest, which stays
+   * local/demo-only. Same shape as submitRealLeaveRequest.
+   */
+  submitRealMissionRequest: (data: {
+    startDate: string;
+    startTime: string;
+    endDate: string;
+    endTime: string;
+    location: string;
+    purpose: string;
+  }) => Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }>;
   approveRequest: (requestId: string, approverId: string, comment?: string) => { ok: boolean; error?: string };
   rejectRequest: (requestId: string, approverId: string, comment: string) => { ok: boolean; error?: string };
   // employeeId must come from the caller's own session, never from a
   // client-editable field on the request — see canEmployeeDeleteRequest.
   deleteRequest: (requestId: string, employeeId: string) => { ok: boolean; error?: string };
+  /**
+   * Real employees only (Phase 6B-6) — calls delete_own_request directly;
+   * entirely separate from deleteRequest, which stays local/demo-only.
+   * Ownership, PENDING status, and stage-1-only are all re-derived and
+   * enforced server-side, never trusted from the client.
+   */
+  deleteRealRequest: (requestId: string) => Promise<{ ok: boolean; error?: string }>;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: (userId: string) => void;
   // HR-only operations. EMPLOYEE/MANAGER creation goes through the real
@@ -1743,6 +1763,17 @@ interface StoreContextValue {
     employeeId: string, employeeName: string,
     data: { permissionKind: PermissionKind; date: string; minutes: number; reason?: string }
   ) => { ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> };
+  /**
+   * Real employees only (Phase 6B-5) — calls submit_permission_request
+   * directly; entirely separate from createPermissionRequest, which stays
+   * local/demo-only. Same shape as submitRealLeaveRequest.
+   */
+  submitRealPermissionRequest: (data: {
+    permissionKind: PermissionKind;
+    date: string;
+    minutes: number;
+    reason?: string;
+  }) => Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }>;
   recordAttendance: (
     data: { employeeId: string; date: string; checkIn?: string; checkOut?: string; note?: string },
     recordedBy: string
@@ -1857,6 +1888,14 @@ function mapRequestRowToRequestRecord(
     start_date: string | null;
     end_date: string | null;
     reason: string | null;
+    // Mission fields (Phase 6B-5).
+    start_time: string | null;
+    end_time: string | null;
+    location: string | null;
+    purpose: string | null;
+    // Permission fields (Phase 6B-5).
+    permission_kind: string | null;
+    permission_minutes: number | null;
     decided_at: string | null;
     decision_comment: string | null;
   },
@@ -1879,6 +1918,12 @@ function mapRequestRowToRequestRecord(
     startDate: row.start_date ?? undefined,
     endDate: row.end_date ?? undefined,
     reason: row.reason ?? undefined,
+    startTime: row.start_time ?? undefined,
+    endTime: row.end_time ?? undefined,
+    location: row.location ?? undefined,
+    purpose: row.purpose ?? undefined,
+    permissionKind: (row.permission_kind as PermissionKind | null) ?? undefined,
+    permissionMinutes: row.permission_minutes ?? undefined,
     decidedAt: row.decided_at ?? undefined,
     decisionComment: row.decision_comment ?? undefined,
   };
@@ -2263,6 +2308,45 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return { ok: true as const, request: created };
   }
 
+  // Phase 6B-5 — real employees only, same shape/reasoning as
+  // submitRealLeaveRequest: entirely separate from createMissionRequest
+  // below (untouched, demo-only). submit_mission_request derives identity
+  // from auth.uid() and is itself authoritative for active-profile,
+  // active-manager, required fields, full-datetime ordering (already fixed
+  // — no raw TIME comparison), and approval-chain construction.
+  async function submitRealMissionRequest(data: {
+    startDate: string;
+    startTime: string;
+    endDate: string;
+    endTime: string;
+    location: string;
+    purpose: string;
+  }): Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+
+    const { data: row, error } = await supabase.rpc("submit_mission_request", {
+      p_start_date: data.startDate,
+      p_start_time: data.startTime,
+      p_end_date: data.endDate,
+      p_end_time: data.endTime,
+      p_location: data.location,
+      p_purpose: data.purpose,
+    });
+    if (error) return { ok: false, error: error.message };
+
+    const { data: approvalRows, error: approvalError } = await supabase
+      .from("request_approvals")
+      .select("stage, role, title, approver_id, approver_name, status, decided_at, comment")
+      .eq("request_id", row.id)
+      .order("stage");
+
+    const request = mapRequestRowToRequestRecord(
+      row,
+      approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
+    );
+    return { ok: true, request };
+  }
+
   function createMissionRequest(
     employeeId: string, employeeName: string,
     data: { startDate: string; startTime: string; endDate: string; endTime: string; location: string; purpose: string }
@@ -2311,6 +2395,40 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     });
 
     return { ok: true as const, request: created };
+  }
+
+  // Phase 6B-5 — real employees only, same shape/reasoning as
+  // submitRealLeaveRequest/submitRealMissionRequest. submit_permission_request
+  // is itself authoritative for active-profile, active-manager, the
+  // weekend/holiday check, the 240-minute cap, one-per-day (advisory-locked),
+  // and balance — none of that is duplicated here.
+  async function submitRealPermissionRequest(data: {
+    permissionKind: PermissionKind;
+    date: string;
+    minutes: number;
+    reason?: string;
+  }): Promise<{ ok: true; request: RequestRecord } | { ok: false; error: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+
+    const { data: row, error } = await supabase.rpc("submit_permission_request", {
+      p_permission_kind: data.permissionKind,
+      p_date: data.date,
+      p_minutes: data.minutes,
+      p_reason: data.reason ?? null,
+    });
+    if (error) return { ok: false, error: error.message };
+
+    const { data: approvalRows, error: approvalError } = await supabase
+      .from("request_approvals")
+      .select("stage, role, title, approver_id, approver_name, status, decided_at, comment")
+      .eq("request_id", row.id)
+      .order("stage");
+
+    const request = mapRequestRowToRequestRecord(
+      row,
+      approvalError || !approvalRows ? [] : approvalRows.map(mapApprovalRowToApprovalStep)
+    );
+    return { ok: true, request };
   }
 
   // A permission is a short absence measured in minutes, not days, so it takes
@@ -2607,6 +2725,18 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       };
     });
 
+    return { ok: true };
+  }
+
+  // Phase 6B-6 — real employees only. Entirely separate from deleteRequest
+  // above (untouched, demo-only): delete_own_request re-derives ownership,
+  // PENDING status, and stage-1 (Direct Manager not yet decided) itself
+  // from auth.uid() and the actual request/request_approvals rows — nothing
+  // here is trusted from the client, this call is a thin pass-through.
+  async function deleteRealRequest(requestId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    const { error } = await supabase.rpc("delete_own_request", { p_request_id: requestId });
+    if (error) return { ok: false, error: error.message };
     return { ok: true };
   }
 
@@ -2960,9 +3090,11 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       attendance: store.attendance, holidays: store.holidays, remoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
       departments, approvalRouting,
-      createLeaveRequest, submitRealLeaveRequest, createMissionRequest, createPermissionRequest,
+      createLeaveRequest, submitRealLeaveRequest,
+      createMissionRequest, submitRealMissionRequest,
+      createPermissionRequest, submitRealPermissionRequest,
       recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
-      approveRequest, rejectRequest, deleteRequest, markNotificationRead, markAllNotificationsRead,
+      approveRequest, rejectRequest, deleteRequest, deleteRealRequest, markNotificationRead, markAllNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
       createDepartment, updateDepartment, setApprovalRouting,
     }}>
@@ -3375,6 +3507,112 @@ function RequestTimeline({ request }: { request: RequestRecord }) {
         );
       })}
     </div>
+  );
+}
+
+// Phase 6B-6 — the immediate post-submission confirmation view for a real
+// Leave/Mission/Permission request is currently the ONLY place the frontend
+// ever holds a reference to a real request at all (the Requests read
+// migration hasn't happened yet, so it never appears in My Requests /
+// Request Detail after this). This shared card is where Delete lives for
+// that reason, reused identically by all three request pages.
+//
+// canEmployeeDeleteRequest is pure (request + employeeId only, no store
+// dependency), so it is safe and correct to reuse unmodified here — it only
+// controls whether the button is offered. delete_own_request is
+// authoritative regardless: it re-derives ownership, PENDING status, and
+// stage-1-only itself, so a stale/manipulated client state can never delete
+// a request that has actually moved past the Direct Manager.
+function RealRequestSuccessCard({ request }: { request: RequestRecord }) {
+  const { session } = useAuth();
+  const { deleteRealRequest } = useStore();
+  const navigate = useNavigate();
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteErr, setDeleteErr] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  const deletable = canEmployeeDeleteRequest(request, session!.user.id);
+
+  async function handleDelete() {
+    setDeleting(true);
+    const res = await deleteRealRequest(request.id);
+    setDeleting(false);
+    if (!res.ok) {
+      setDeleteErr(res.error ?? "This request could not be deleted.");
+      return;
+    }
+    navigate("/employee/requests", { replace: true, state: { justDeleted: true } });
+  }
+
+  return (
+    <Card>
+      <Alert variant="success">
+        <p className="font-medium text-green-800 text-sm">Request submitted successfully</p>
+        <p className="text-sm text-green-700 mt-0.5">
+          Your request has been sent to your direct manager for approval.
+        </p>
+      </Alert>
+      <div className="rounded-[10px] border border-border divide-y divide-border mt-4">
+        {[
+          { label: "Request Number", value: request.requestNumber },
+          { label: "Type", value: requestLabel(request) },
+          { label: "Period", value: requestPeriod(request) },
+          { label: "Status", value: request.status },
+        ].map(({ label, value }) => (
+          <div key={label} className="flex items-center gap-4 px-4 py-2.5">
+            <p className="text-xs text-muted-foreground w-32 flex-shrink-0">{label}</p>
+            <p className="text-sm font-medium">{value}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-5">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+          Approval chain
+        </p>
+        <RequestTimeline request={request} />
+      </div>
+      {deletable && (
+        <div className="mt-5 pt-5 border-t border-border">
+          <Button variant="destructive" onClick={() => setShowDeleteModal(true)}>
+            Delete Request
+          </Button>
+        </div>
+      )}
+      <div className="mt-5">
+        <Button variant="primary" onClick={() => navigate("/employee/requests")}>Back to My Requests</Button>
+      </div>
+
+      <Modal
+        open={showDeleteModal}
+        onClose={() => { setShowDeleteModal(false); setDeleteErr(""); }}
+        title="Delete request?"
+        size="sm"
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to delete request {request.requestNumber}?
+            This action cannot be undone.
+          </p>
+          {deleteErr && (
+            <Alert variant="error">
+              <p className="text-sm text-red-800">{deleteErr}</p>
+            </Alert>
+          )}
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => { setShowDeleteModal(false); setDeleteErr(""); }}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} loading={deleting}>
+              Delete Request
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </Card>
   );
 }
 
@@ -4007,36 +4245,7 @@ function LeaveRequestPage() {
     return (
       <DashboardShell activeNavId={selfNavId} pageTitle="Request Leave">
         <div className="max-w-2xl">
-          <Card>
-            <Alert variant="success">
-              <p className="font-medium text-green-800 text-sm">Request submitted successfully</p>
-              <p className="text-sm text-green-700 mt-0.5">
-                Your request has been sent to your direct manager for approval.
-              </p>
-            </Alert>
-            <div className="rounded-[10px] border border-border divide-y divide-border mt-4">
-              {[
-                { label: "Request Number", value: realResult.requestNumber },
-                { label: "Leave Type", value: requestLabel(realResult) },
-                { label: "Period", value: requestPeriod(realResult) },
-                { label: "Status", value: realResult.status },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex items-center gap-4 px-4 py-2.5">
-                  <p className="text-xs text-muted-foreground w-32 flex-shrink-0">{label}</p>
-                  <p className="text-sm font-medium">{value}</p>
-                </div>
-              ))}
-            </div>
-            <div className="mt-5">
-              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-                Approval chain
-              </p>
-              <RequestTimeline request={realResult} />
-            </div>
-            <div className="mt-5">
-              <Button variant="primary" onClick={() => navigate("/employee/requests")}>Back to My Requests</Button>
-            </div>
-          </Card>
+          <RealRequestSuccessCard request={realResult} />
         </div>
       </DashboardShell>
     );
@@ -4131,11 +4340,17 @@ function LeaveRequestPage() {
 function MissionRequestPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
-  const { employees, createMissionRequest } = useStore();
+  const { employees, createMissionRequest, submitRealMissionRequest, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
 
+  const isReal = isRemoteEmployee(session!.user.id);
   const manager = getManagerForEmployee(employees, session!.user.id);
-  const chain = buildApprovalChain(employees, session!.user.id);
+  // Preview only — see LeaveRequestPage's identical fix (Phase 6B-4) for why
+  // this is restricted to real employees for a real requester: the
+  // Technical Manager/General Manager role-scan inside buildApprovalChain
+  // would otherwise resolve to a demo person ahead of the real one.
+  const chainEmployees = isReal ? employees.filter((e) => isRemoteEmployee(e.id)) : employees;
+  const chain = buildApprovalChain(chainEmployees, session!.user.id);
 
   const [startDate, setStartDate] = useState("");
   const [startTime, setStartTime] = useState("");
@@ -4145,6 +4360,10 @@ function MissionRequestPage() {
   const [purpose, setPurpose] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  // Real submission only — see LeaveRequestPage's identical realResult
+  // (Phase 6B-4): the Supabase-created request/approval chain for the
+  // immediate confirmation view, never written into store.requests.
+  const [realResult, setRealResult] = useState<RequestRecord | null>(null);
 
   function clearErr(field: string) {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
@@ -4164,9 +4383,27 @@ function MissionRequestPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // validateMissionFields is pure/stateless (no store dependency), so it
+    // is safe and correct to reuse unchanged for the real path too — unlike
+    // Leave/Permission, Mission has no overlap or balance concept to keep
+    // server-only.
     const errs = validateMissionFields({ startDate, startTime, endDate, endTime, location, purpose });
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
     setErrors({});
+
+    if (isReal) {
+      setSubmitting(true);
+      const result = await submitRealMissionRequest({ startDate, startTime, endDate, endTime, location, purpose });
+      setSubmitting(false);
+      if (!result.ok) {
+        setErrors({ _form: result.error });
+        return;
+      }
+      setRealResult(result.request);
+      return;
+    }
+
+    // Unchanged demo path.
     setSubmitting(true);
     await new Promise((r) => setTimeout(r, 700));
     const result = createMissionRequest(session!.user.id, session!.user.name, {
@@ -4180,6 +4417,16 @@ function MissionRequestPage() {
     navigate(`/employee/requests/${result.request.id}`, {
       replace: true, state: { justSubmitted: true },
     });
+  }
+
+  if (realResult) {
+    return (
+      <DashboardShell activeNavId={selfNavId} pageTitle="Request Mission">
+        <div className="max-w-2xl">
+          <RealRequestSuccessCard request={realResult} />
+        </div>
+      </DashboardShell>
+    );
   }
 
   return (
@@ -4274,12 +4521,34 @@ function MissionRequestPage() {
 // PAGE: E06 — REQUEST DETAIL (employee view)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Real employees only (Phase 6B-5) — minimal, UX-only checks: required
+// fields and minute bounds. The weekend/holiday check, one-permission-
+// per-day (advisory-locked), and balance check are all server-authoritative
+// inside submit_permission_request and are deliberately not duplicated
+// here — unlike Mission's validateMissionFields, validatePermissionFields
+// requires local store.requests/attendance/holidays and so cannot be
+// safely reused for a real employee (same reasoning as Leave, Phase 6B-4).
+function validateRealPermissionFields(data: { permissionKind: PermissionKind | ""; date: string; minutes: string }): Record<string, string> {
+  const errs: Record<string, string> = {};
+  if (!data.permissionKind) errs.permissionKind = "Choose late arrival or early departure.";
+  if (!data.date) errs.date = "Date is required.";
+  const n = Number(data.minutes);
+  if (!data.minutes || !Number.isFinite(n) || n <= 0) {
+    errs.minutes = "Enter how many minutes you need.";
+  } else if (n > 240) {
+    errs.minutes = "A single permission cannot exceed 240 minutes.";
+  }
+  return errs;
+}
+
 function PermissionRequestPage() {
   const selfNavId = useSelfServiceNavId();
   const { session } = useAuth();
-  const { employees, createPermissionRequest } = useStore();
+  const { employees, createPermissionRequest, submitRealPermissionRequest, isRemoteEmployee } = useStore();
   const { permission } = useMyBalances();
   const navigate = useNavigate();
+
+  const isReal = isRemoteEmployee(session!.user.id);
 
   const [kind, setKind] = useState<PermissionKind | "">("");
   const [date, setDate] = useState("");
@@ -4287,6 +4556,10 @@ function PermissionRequestPage() {
   const [reason, setReason] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  // Real submission only — see LeaveRequestPage's identical realResult
+  // (Phase 6B-4): the Supabase-created request/approval for the immediate
+  // confirmation view, never written into store.requests.
+  const [realResult, setRealResult] = useState<RequestRecord | null>(null);
 
   const manager = getManagerForEmployee(employees, session!.user.id);
   const exhausted = !permission || permission.available === 0;
@@ -4298,6 +4571,27 @@ function PermissionRequestPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErrors({});
+
+    if (isReal) {
+      const errs = validateRealPermissionFields({ permissionKind: kind, date, minutes });
+      if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+      setSubmitting(true);
+      const result = await submitRealPermissionRequest({
+        permissionKind: kind as PermissionKind,
+        date,
+        minutes: Number(minutes),
+        reason: reason.trim() || undefined,
+      });
+      setSubmitting(false);
+      if (!result.ok) {
+        setErrors({ _form: result.error });
+        return;
+      }
+      setRealResult(result.request);
+      return;
+    }
+
+    // Unchanged demo path.
     setSubmitting(true);
     try {
       const result = createPermissionRequest(session!.user.id, session!.user.name, {
@@ -4318,6 +4612,16 @@ function PermissionRequestPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (realResult) {
+    return (
+      <DashboardShell activeNavId={selfNavId} pageTitle="Request Permission">
+        <div className="max-w-2xl">
+          <RealRequestSuccessCard request={realResult} />
+        </div>
+      </DashboardShell>
+    );
   }
 
   return (
