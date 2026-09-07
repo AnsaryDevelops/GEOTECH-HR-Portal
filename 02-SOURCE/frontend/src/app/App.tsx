@@ -4256,11 +4256,14 @@ function MyCalendarWidget() {
 
 function EmployeeDashboardPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, realRequests, isRemoteEmployee } = useStore();
   const { leave: myLeave, permission: myPermission } = useMyBalances();
   const navigate = useNavigate();
 
-  const myRequests = requests.filter((r) => r.employeeId === session!.user.id);
+  // Real employee: realRequests (Phase 6B-13) — already scoped by RLS to
+  // this employee's own requests. Demo employee: unchanged, local only.
+  const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
+  const myRequests = sourceRequests.filter((r) => r.employeeId === session!.user.id);
   const pending = myRequests.filter((r) => r.status === "PENDING").length;
   const approved = myRequests.filter((r) => r.status === "APPROVED").length;
   const recent = [...myRequests]
@@ -5855,7 +5858,15 @@ function ManagerTeamPage() {
 // activate or role controls: changing people stays with HR.
 
 function OrganizationPage() {
-  const { employees, requests } = useStore();
+  const { session } = useAuth();
+  const { employees, requests, realRequests, isRemoteEmployee } = useStore();
+  // Real TM/GM: realRequests (Phase 6B-13) — already scoped by RLS to
+  // whatever this viewer is authorized to see (every Leave/Mission chain
+  // they're in, which for TM/GM is effectively the whole organisation; a
+  // Permission request stays visible only if their own direct-manager
+  // relationship put them on it — the same RLS boundary every other real
+  // page already respects). Demo TM/GM: unchanged, local only.
+  const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
   const [filterEmployee, setFilterEmployee] = useState("");
   const [filterManager, setFilterManager] = useState("");
   const [filterType, setFilterType] = useState<"" | "LEAVE" | "MISSION" | "PERMISSION">("");
@@ -5887,7 +5898,7 @@ function OrganizationPage() {
   const rows = employees.filter((e) => {
     if (filterEmployee && e.name !== filterEmployee) return false;
     if (filterManager && managerName(e) !== filterManager) return false;
-    if (filterType && !requests.some((r) => r.employeeId === e.id && r.type === filterType)) return false;
+    if (filterType && !sourceRequests.some((r) => r.employeeId === e.id && r.type === filterType)) return false;
     return true;
   });
 
@@ -6587,17 +6598,23 @@ function ManagerNotificationsPage() {
 // ─── H01 — HR Dashboard ───────────────────────────────────────────────────────
 
 function HRDashboardPage() {
-  const { requests, employees, notifications } = useStore();
+  const { session } = useAuth();
+  const { requests, realRequests, employees, notifications, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
+
+  // Real HR: realRequests (Phase 6B-13) — already scoped by RLS
+  // (requests_select_hr) to every request in the system. Demo HR:
+  // unchanged, local only.
+  const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
 
   const totalEmp = employees.length;
   const activeEmp = employees.filter((e) => e.status === "ACTIVE").length;
-  const totalReq = requests.length;
-  const pending = requests.filter((r) => r.status === "PENDING").length;
-  const approved = requests.filter((r) => r.status === "APPROVED").length;
-  const rejected = requests.filter((r) => r.status === "REJECTED").length;
+  const totalReq = sourceRequests.length;
+  const pending = sourceRequests.filter((r) => r.status === "PENDING").length;
+  const approved = sourceRequests.filter((r) => r.status === "APPROVED").length;
+  const rejected = sourceRequests.filter((r) => r.status === "REJECTED").length;
 
-  const recent = [...requests]
+  const recent = [...sourceRequests]
     .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
     .slice(0, 8);
 
@@ -6644,7 +6661,7 @@ function HRDashboardPage() {
         <Card className="lg:col-span-2">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-semibold text-foreground">Recent Requests</h3>
-            {requests.length > 0 && (
+            {sourceRequests.length > 0 && (
               <button className="text-xs text-primary hover:underline" onClick={() => navigate("/hr/requests")}>
                 View all
               </button>
