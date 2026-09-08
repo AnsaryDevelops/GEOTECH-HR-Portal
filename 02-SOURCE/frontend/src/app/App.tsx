@@ -86,6 +86,7 @@ import {
   subscribeToAuthChanges,
   provisionEmployeeAccount,
   changePassword,
+  adminUpdateEmployeePassword,
 } from "../lib/auth";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
 import companyLogoSrc from "../imports/GEO_Egypt_LOGO-01.png";
@@ -7126,16 +7127,28 @@ function HREmployeesPage() {
       employees, editTarget.id
     );
     Object.assign(errs, validateBalanceFields(editForm));
-    // Real-employee password reset isn't wired up yet — their password lives
-    // in Supabase Auth, not the local credential store, and resetting it
-    // needs its own trusted server-side path (out of scope for Phase 6A,
-    // profiles only). Declined clearly rather than silently doing nothing.
-    if (editForm.password.trim() && isRemoteEmployee(editTarget.id)) {
-      errs.password = "Password reset for real employee accounts isn't available yet.";
-    }
     if (Object.keys(errs).length > 0) { setEditErrors(errs); return; }
     setEditSaving(true);
     const isReal = isRemoteEmployee(editTarget.id);
+
+    // A real employee's password lives in Supabase Auth, not the profile
+    // row — changed first, and gated on, so a failure here never leaves HR
+    // thinking the password changed when the rest of the form saved (or
+    // vice versa). Left blank, the existing password is untouched: HR is
+    // never shown it and never asked to re-enter it. Local demo employees
+    // are unaffected — their password stays in the existing local
+    // credential store, updated after the save below, exactly as before.
+    const newPassword = editForm.password.trim();
+    if (newPassword && isReal) {
+      const pwResult = await adminUpdateEmployeePassword(editTarget.id, newPassword);
+      if (!pwResult.ok) {
+        setEditErrors({ password: pwResult.error });
+        setEditSaving(false);
+        return;
+      }
+      setEditForm((f) => ({ ...f, password: "" }));
+    }
+
     const result = await updateEmployee(editTarget.id, {
       firstName: editForm.firstName.trim(),
       lastName: editForm.lastName.trim(),
@@ -7158,13 +7171,10 @@ function HREmployeesPage() {
       setEditSaving(false);
       return;
     }
-    // Left blank, the employee's existing password is untouched — HR is never
-    // shown it and never asked to re-enter it. Only a non-empty value here
-    // goes through the same salted-hash credential update createEmployee
-    // already uses for the initial password. (Local demo employees only —
-    // guarded above for real employees.)
-    if (editForm.password.trim()) {
-      updateHRUserCredential(editTarget.id, { password: editForm.password.trim() });
+    // Local demo employees only — the real-employee case was already handled
+    // above via Supabase Auth and its password field already cleared.
+    if (newPassword && !isReal) {
+      updateHRUserCredential(editTarget.id, { password: newPassword });
     }
     setEditSaving(false);
     setEditTarget(null);

@@ -688,3 +688,47 @@ export async function provisionEmployeeAccount(
     return { ok: false, error: 'Could not reach the server. Please try again.' }
   }
 }
+
+// ─── HR-driven password change for a real employee (Supabase) ────────────────
+
+export type AdminUpdatePasswordResult = { ok: true } | { ok: false; error: string }
+
+/**
+ * Calls the hr-update-employee-password Edge Function — the only path that
+ * can change a real employee's Supabase Auth password on HR's behalf. Wired
+ * into the Edit Employee form's existing Password field
+ * (HREmployeesPage.handleEdit).
+ *
+ * This never signs the target employee in and never asks for or reads their
+ * current password — it goes straight through a server-side admin operation
+ * scoped to the caller (verified HR) and the one profile HR selected. See
+ * that function for the full trust chain.
+ */
+export async function adminUpdateEmployeePassword(
+  profileId: string,
+  newPassword: string
+): Promise<AdminUpdatePasswordResult> {
+  if (!supabase) {
+    return { ok: false, error: 'Supabase is not configured in this environment.' }
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session) {
+    return { ok: false, error: 'You must be signed in as HR to change a password.' }
+  }
+
+  try {
+    const { error } = await supabase.functions.invoke('hr-update-employee-password', {
+      body: { profile_id: profileId, new_password: newPassword },
+    })
+
+    if (error) {
+      return { ok: false, error: error.message }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'Could not reach the server. Please try again.' }
+  }
+}
