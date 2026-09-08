@@ -1891,7 +1891,8 @@ interface StoreContextValue {
    */
   createLeaveType: (
     name: string,
-    balanceKey: BalanceKey | null
+    balanceKey: BalanceKey | null,
+    minimumNoticeDays?: number
   ) => Promise<{ ok: boolean; error?: string; leaveType?: LeaveTypeRecord }>;
   /** Real path is HR-only (leave_types_update_hr RLS re-enforces server-side); demo path unchanged. */
   updateLeaveType: (id: string, updates: Partial<LeaveTypeRecord>) => Promise<{ ok: boolean; error?: string }>;
@@ -2251,7 +2252,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     try {
       const { data, error } = await supabase
         .from("leave_types")
-        .select("id, name, status, balance_key")
+        .select("id, name, status, balance_key, minimum_notice_days")
         .order("name");
       if (error || !data) {
         setRemoteLeaveTypes([]);
@@ -2263,6 +2264,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
           name: row.name,
           status: row.status,
           balanceKey: row.balance_key,
+          minimumNoticeDays: row.minimum_notice_days ?? 0,
         }))
       );
     } catch {
@@ -3455,7 +3457,8 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // including inactive ones, not just active ones.
   async function createLeaveType(
     name: string,
-    balanceKey: BalanceKey | null
+    balanceKey: BalanceKey | null,
+    minimumNoticeDays: number = 0
   ): Promise<{ ok: boolean; error?: string; leaveType?: LeaveTypeRecord }> {
     const trimmed = name.trim();
     if (!trimmed) return { ok: false, error: "Name is required." };
@@ -3467,7 +3470,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       }
       const { error } = await supabase
         .from("leave_types")
-        .insert({ name: trimmed, balance_key: balanceKey });
+        .insert({ name: trimmed, balance_key: balanceKey, minimum_notice_days: minimumNoticeDays });
       if (error) {
         return {
           ok: false,
@@ -3480,7 +3483,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
 
     // Unchanged local demo path.
     const id = `lt-${store.nextLeaveTypeSeq}`;
-    const lt: LeaveTypeRecord = { id, name: trimmed, status: "ACTIVE", balanceKey };
+    const lt: LeaveTypeRecord = { id, name: trimmed, status: "ACTIVE", balanceKey, minimumNoticeDays };
     mutate((p) => ({ ...p, leaveTypes: [...p.leaveTypes, lt], nextLeaveTypeSeq: p.nextLeaveTypeSeq + 1 }));
     return { ok: true, leaveType: lt };
   }
@@ -3505,6 +3508,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       if (updates.name !== undefined) patch.name = updates.name.trim();
       if (updates.balanceKey !== undefined) patch.balance_key = updates.balanceKey;
       if (updates.status !== undefined) patch.status = updates.status;
+      if (updates.minimumNoticeDays !== undefined) patch.minimum_notice_days = updates.minimumNoticeDays;
       const { error } = await supabase.from("leave_types").update(patch).eq("id", id);
       if (error) {
         return {
@@ -4845,6 +4849,22 @@ function LeaveRequestPage() {
     if (!endDate) errs.endDate = "End Date is required.";
     if (startDate && endDate && endDate < startDate) {
       errs.endDate = "End Date cannot be before Start Date.";
+    }
+    // Minimum advance-notice policy (Phase 2), mirrored client-side for
+    // immediate feedback — applies to the START DATE only, never the
+    // requested duration. The real boundary is submit_leave_request's own
+    // identical check; this cannot be bypassed by calling the RPC directly.
+    // 0/undefined minimumNoticeDays means no restriction (e.g. Emergency/Sick).
+    if (startDate) {
+      const selectedType = remoteLeaveTypes.find((lt) => lt.id === leaveType);
+      if (selectedType?.minimumNoticeDays) {
+        const earliest = new Date();
+        earliest.setDate(earliest.getDate() + selectedType.minimumNoticeDays);
+        if (startDate < toISODate(earliest)) {
+          const n = selectedType.minimumNoticeDays;
+          errs.startDate = `${selectedType.name} must be requested at least ${n} day${n === 1 ? "" : "s"} in advance.`;
+        }
+      }
     }
     return errs;
   }
@@ -8259,6 +8279,10 @@ function HRSettingsPage() {
   const [editError, setEditError] = useState("");
   const [newBalanceKey, setNewBalanceKey] = useState<BalanceKey | "">("");
   const [editBalanceKey, setEditBalanceKey] = useState<BalanceKey | "">("");
+  // Minimum advance-notice policy (Phase 2) — 0 (the field's default) means
+  // no restriction, matching leave_types.minimum_notice_days' own default.
+  const [newMinNotice, setNewMinNotice] = useState("0");
+  const [editMinNotice, setEditMinNotice] = useState("0");
   const [saving, setSaving] = useState(false);
   const [toggleError, setToggleError] = useState("");
 
@@ -8269,10 +8293,10 @@ function HRSettingsPage() {
       setAddError("A leave type with this name already exists."); return;
     }
     setSaving(true);
-    const res = await createLeaveType(trimmed, newBalanceKey || null);
+    const res = await createLeaveType(trimmed, newBalanceKey || null, Math.max(0, Number(newMinNotice) || 0));
     setSaving(false);
     if (!res.ok) { setAddError(res.error ?? "Could not add that leave type."); return; }
-    setNewName(""); setNewBalanceKey(""); setShowAdd(false); setAddError("");
+    setNewName(""); setNewBalanceKey(""); setNewMinNotice("0"); setShowAdd(false); setAddError("");
   }
 
   async function handleEdit() {
@@ -8283,10 +8307,13 @@ function HRSettingsPage() {
       setEditError("A leave type with this name already exists."); return;
     }
     setSaving(true);
-    const res = await updateLeaveType(editTarget.id, { name: trimmed, balanceKey: editBalanceKey || null });
+    const res = await updateLeaveType(editTarget.id, {
+      name: trimmed, balanceKey: editBalanceKey || null,
+      minimumNoticeDays: Math.max(0, Number(editMinNotice) || 0),
+    });
     setSaving(false);
     if (!res.ok) { setEditError(res.error ?? "Could not save changes."); return; }
-    setEditTarget(null); setEditName(""); setEditBalanceKey(""); setEditError("");
+    setEditTarget(null); setEditName(""); setEditBalanceKey(""); setEditMinNotice("0"); setEditError("");
   }
 
   async function handleToggleStatus(lt: LeaveTypeRecord) {
@@ -8303,7 +8330,7 @@ function HRSettingsPage() {
             <h2 className="text-lg font-semibold text-foreground">Leave Types</h2>
             <p className="text-sm text-muted-foreground mt-0.5">Manage the leave types available to employees.</p>
           </div>
-          <Button variant="primary" onClick={() => { setShowAdd(true); setNewName(""); setAddError(""); }} className="gap-1.5">
+          <Button variant="primary" onClick={() => { setShowAdd(true); setNewName(""); setNewMinNotice("0"); setAddError(""); }} className="gap-1.5">
             <Plus className="h-4 w-4" /> Add Leave Type
           </Button>
         </div>
@@ -8330,6 +8357,16 @@ function HRSettingsPage() {
                   <option value="ANNUAL">Charge annual balance</option>
                   <option value="CASUAL">Charge casual balance</option>
                 </Select>
+              </div>
+              <div className="w-full sm:w-40">
+                <Input
+                  type="number"
+                  min={0}
+                  step={1}
+                  placeholder="Notice (days)"
+                  value={newMinNotice}
+                  onChange={(e) => setNewMinNotice(e.target.value)}
+                />
               </div>
               <div className="flex gap-2 pt-0.5">
                 <Button variant="primary" onClick={handleAdd} loading={saving}>Save</Button>
@@ -8371,6 +8408,16 @@ function HRSettingsPage() {
                             <option value="CASUAL">Charge casual balance</option>
                           </Select>
                         </div>
+                        <div className="w-40">
+                          <Input
+                            type="number"
+                            min={0}
+                            step={1}
+                            placeholder="Notice (days)"
+                            value={editMinNotice}
+                            onChange={(e) => setEditMinNotice(e.target.value)}
+                          />
+                        </div>
                         <div className="flex gap-2 pt-0.5">
                           <Button variant="primary" onClick={handleEdit} loading={saving}>Save</Button>
                           <Button variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
@@ -8383,6 +8430,10 @@ function HRSettingsPage() {
                           {lt.balanceKey
                             ? `Charged to ${BALANCE_LABEL[lt.balanceKey].toLowerCase()} balance`
                             : "Not balance-limited"}
+                          {" · "}
+                          {lt.minimumNoticeDays
+                            ? `${lt.minimumNoticeDays} day${lt.minimumNoticeDays === 1 ? "" : "s"} minimum notice`
+                            : "No advance-notice requirement"}
                         </p>
                       </div>
                     )}
@@ -8391,7 +8442,7 @@ function HRSettingsPage() {
                     <div className="flex items-center gap-3 flex-shrink-0">
                       <StatusBadge status={lt.status === "ACTIVE" ? "active" : "inactive"} />
                       <button
-                        onClick={() => { setEditTarget(lt); setEditName(lt.name); setEditBalanceKey(lt.balanceKey ?? ""); setEditError(""); }}
+                        onClick={() => { setEditTarget(lt); setEditName(lt.name); setEditBalanceKey(lt.balanceKey ?? ""); setEditMinNotice(String(lt.minimumNoticeDays ?? 0)); setEditError(""); }}
                         className="text-xs text-primary hover:underline font-medium"
                       >
                         Edit

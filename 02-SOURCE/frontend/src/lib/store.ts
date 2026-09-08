@@ -72,6 +72,8 @@ export interface LeaveTypeRecord {
   name: string;
   status: "ACTIVE" | "INACTIVE";
   balanceKey?: BalanceKey | null;
+  /** Minimum days between submission and the leave's start date. 0/undefined = no restriction. */
+  minimumNoticeDays?: number;
 }
 
 export const DEFAULT_LEAVE_TYPES: LeaveTypeRecord[] = [
