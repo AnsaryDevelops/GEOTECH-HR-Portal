@@ -1840,13 +1840,14 @@ interface StoreContextValue {
   /**
    * Real path is HR-only (public_holidays_insert_hr RLS re-enforces
    * server-side); demo path unchanged since before Phase 6B-2. Public
-   * Holidays has no archive/inactive concept in either layer — add/remove
-   * only, matching public_holidays' own RLS exactly (INSERT/DELETE grants,
-   * no UPDATE grant at all).
+   * Holidays has no archive/inactive concept in either layer — add/remove/
+   * edit only.
    */
   createHoliday: (date: string, name: string) => Promise<{ ok: boolean; error?: string }>;
   /** Real path is HR-only (public_holidays_delete_hr RLS re-enforces server-side); demo path unchanged. */
   deleteHoliday: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Real path is HR-only (public_holidays_update_hr RLS re-enforces server-side); demo path unchanged. */
+  updateHoliday: (id: string, date: string, name: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 // Phase 6A — profiles only. Maps one `profiles` row (Supabase) onto the
@@ -1871,6 +1872,7 @@ function mapProfileRowToEmployeeProfile(row: {
   role: UserRole;
   manager_id: string | null;
   permission_minutes_per_month: number;
+  is_production: boolean | null;
 }): EmployeeProfile {
   // PostgREST embeds a to-one FK relationship as a single object normally,
   // but the generic client type used here allows either shape — handle both
@@ -1892,11 +1894,12 @@ function mapProfileRowToEmployeeProfile(row: {
     role: row.role,
     entitlements: { ANNUAL: 0, CASUAL: 0 },
     permissionMinutesPerMonth: row.permission_minutes_per_month,
+    isProduction: row.is_production ?? true,
   };
 }
 
 const PROFILE_SELECT_COLUMNS =
-  "id, employee_code, first_name, last_name, name, position, department, department_id, departments(name), email, phone, status, role, manager_id, permission_minutes_per_month";
+  "id, employee_code, first_name, last_name, name, position, department, department_id, departments(name), email, phone, status, role, manager_id, permission_minutes_per_month, is_production";
 
 // Phase 6B-4 — real Leave submission only. Maps one Supabase `request_approvals`
 // row onto the existing ApprovalStep shape, and one `requests` row (as
@@ -2291,6 +2294,12 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       const { data, error } = await supabase
         .from("requests")
         .select(REQUEST_SELECT_COLUMNS)
+        // Archived requests (REQ-00003/REQ-00004: protected historical
+        // records kept permanently for referential/audit reasons, never
+        // deleted) are excluded from every normal request list, dashboard,
+        // and count in one place — this is the only `.from("requests")`
+        // read site in the app.
+        .is("archived_at", null)
         .order("submitted_at", { ascending: false })
         .order("stage", { foreignTable: "request_approvals", ascending: true });
       if (error || !data) {
@@ -2898,6 +2907,45 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return { ok: true };
   }
 
+  // Real path is HR-only (public_holidays_update_hr RLS re-checks
+  // server-side too). Same validation as createHoliday: a date and a
+  // non-empty name are required, and the date must not collide with a
+  // different holiday — excluding this row itself, which would otherwise
+  // always match its own current date.
+  async function updateHoliday(id: string, date: string, name: string): Promise<{ ok: boolean; error?: string }> {
+    if (!date) return { ok: false, error: "Choose a date." };
+    const trimmed = name.trim();
+    if (!trimmed) return { ok: false, error: "Give the holiday a name." };
+
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      if (remoteHolidays.some((h) => h.date === date && h.id !== id)) {
+        return { ok: false, error: "That date is already a public holiday." };
+      }
+      const { error } = await supabase.from("public_holidays").update({ date, name: trimmed }).eq("id", id);
+      if (error) {
+        return {
+          ok: false,
+          error: error.code === "23505" ? "That date is already a public holiday." : error.message,
+        };
+      }
+      await fetchRemoteHolidays();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
+    if (store.holidays.some((h) => h.date === date && h.id !== id)) {
+      return { ok: false, error: "That date is already a public holiday." };
+    }
+    mutate((p) => ({
+      ...p,
+      holidays: p.holidays
+        .map((h) => (h.id === id ? { ...h, date, name: trimmed } : h))
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    }));
+    return { ok: true };
+  }
+
   // Approving advances the request to the next stage in its snapshotted chain.
   // Only the last stage marks the whole request APPROVED. Rejection at any
   // stage closes the request immediately — there is no partial rejection.
@@ -3441,7 +3489,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       createLeaveRequest, submitRealLeaveRequest,
       createMissionRequest, submitRealMissionRequest,
       createPermissionRequest, submitRealPermissionRequest,
-      recordAttendance, deleteAttendance, createHoliday, deleteHoliday,
+      recordAttendance, deleteAttendance, createHoliday, deleteHoliday, updateHoliday,
       approveRequest, rejectRequest, deleteRequest, deleteRealRequest, decideRealRequest, markNotificationRead, markAllNotificationsRead,
       realNotifications, markRealNotificationRead, markAllRealNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
@@ -7017,11 +7065,26 @@ const EMPTY_FORM: EmployeeFormData = {
 };
 
 function HREmployeesPage() {
+  const { session } = useAuth();
   const { employees, createEmployee, updateEmployee, isRemoteEmployee, departments, fetchEmployeeLeaveAllocations } = useStore();
   const [search, setSearch] = useState("");
   const [filterRole, setFilterRole] = useState<"" | UserRole>("");
   const [filterDept, setFilterDept] = useState("");
   const [filterStatus, setFilterStatus] = useState<"" | "ACTIVE" | "INACTIVE">("");
+
+  // The directory shown here is real-vs-demo isolated exactly like every
+  // other HR section (Holidays, Leave Types, Departments...) already is: a
+  // real HR session sees only real Supabase profiles, a local demo HR
+  // session sees only the local demo roster. Among real profiles, only
+  // is_production ones are shown — legacy/test profiles (kept only because
+  // protected historical requests reference them) are excluded from the
+  // normal directory without being deleted or deactivated. `employees`
+  // itself (the combined list) is left untouched — eligibleManagers below,
+  // and every other consumer of useStore().employees (including a
+  // legacy/test account finding its own profile), still reads the full list.
+  const directoryEmployees = session && isRemoteEmployee(session.user.id)
+    ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
+    : employees.filter((e) => !isRemoteEmployee(e.id));
 
   // Add employee modal
   const [showAdd, setShowAdd] = useState(false);
@@ -7046,7 +7109,7 @@ function HREmployeesPage() {
 
   // Filtering
   const q = search.toLowerCase().trim();
-  const filtered = employees.filter((e) => {
+  const filtered = directoryEmployees.filter((e) => {
     if (q && !e.name.toLowerCase().includes(q) && !e.id.toLowerCase().includes(q) && !(e.employeeCode?.toLowerCase().includes(q) ?? false)) return false;
     if (filterRole && e.role !== filterRole) return false;
     if (filterDept && e.department !== filterDept) return false;
@@ -8097,7 +8160,7 @@ function HRSettingsPage() {
 // leave types. Islamic dates shift every year, which is why they are data.
 function HolidaysSection() {
   const { session } = useAuth();
-  const { holidays: localHolidays, remoteHolidays, createHoliday, deleteHoliday, isRemoteEmployee } = useStore();
+  const { holidays: localHolidays, remoteHolidays, createHoliday, deleteHoliday, updateHoliday, isRemoteEmployee } = useStore();
   // Real HR (e.g. TESTHR01) manages the real Supabase list; a local demo HR
   // account keeps managing the existing local one, unaffected — same
   // isolation rule as Phase 6B-1 Leave Types.
@@ -8110,6 +8173,12 @@ function HolidaysSection() {
   const [saving, setSaving] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [removingId, setRemovingId] = useState("");
+
+  const [editTarget, setEditTarget] = useState<HolidayRecord | null>(null);
+  const [editDate, setEditDate] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editError, setEditError] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   async function handleAdd() {
     setSaving(true);
@@ -8125,6 +8194,22 @@ function HolidaysSection() {
     const res = await deleteHoliday(id);
     setRemovingId("");
     if (!res.ok) setRemoveError(res.error ?? "Could not remove that holiday.");
+  }
+
+  function openEdit(h: HolidayRecord) {
+    setEditTarget(h);
+    setEditDate(h.date);
+    setEditName(h.name);
+    setEditError("");
+  }
+
+  async function handleEditSave() {
+    if (!editTarget) return;
+    setEditSaving(true);
+    const res = await updateHoliday(editTarget.id, editDate, editName);
+    setEditSaving(false);
+    if (!res.ok) { setEditError(res.error ?? "Could not save changes."); return; }
+    setEditTarget(null); setEditDate(""); setEditName(""); setEditError("");
   }
 
   return (
@@ -8167,19 +8252,45 @@ function HolidaysSection() {
           </div>
         ) : (
           <div className="divide-y divide-border">
-            {holidays.map((h) => (
-              <div key={h.id} className="flex items-center gap-4 px-4 py-3">
-                <p className="text-sm font-medium text-foreground w-32 flex-shrink-0 tabular-nums">{fmtDate(h.date)}</p>
-                <p className="text-sm text-muted-foreground flex-1 min-w-0 truncate">{h.name}</p>
-                <button
-                  onClick={() => handleRemove(h.id)}
-                  disabled={removingId === h.id}
-                  className="text-xs text-destructive hover:underline flex-shrink-0 disabled:opacity-50 disabled:pointer-events-none"
-                >
-                  {removingId === h.id ? "Removing…" : "Remove"}
-                </button>
-              </div>
-            ))}
+            {holidays.map((h) =>
+              editTarget?.id === h.id ? (
+                <div key={h.id} className="flex flex-col sm:flex-row gap-3 items-start px-4 py-3">
+                  <div className="w-full sm:w-48">
+                    <DatePicker value={editDate} onChange={(e) => { setEditDate(e.target.value); setEditError(""); }} />
+                  </div>
+                  <div className="flex-1 w-full">
+                    <Input
+                      placeholder="Holiday name"
+                      value={editName}
+                      onChange={(e) => { setEditName(e.target.value); setEditError(""); }}
+                      error={editError}
+                    />
+                  </div>
+                  <div className="flex gap-2 pt-0.5">
+                    <Button variant="primary" onClick={handleEditSave} loading={editSaving}>Save</Button>
+                    <Button variant="secondary" onClick={() => { setEditTarget(null); setEditError(""); }}>Cancel</Button>
+                  </div>
+                </div>
+              ) : (
+                <div key={h.id} className="flex items-center gap-4 px-4 py-3">
+                  <p className="text-sm font-medium text-foreground w-32 flex-shrink-0 tabular-nums">{fmtDate(h.date)}</p>
+                  <p className="text-sm text-muted-foreground flex-1 min-w-0 truncate">{h.name}</p>
+                  <button
+                    onClick={() => openEdit(h)}
+                    className="text-xs text-primary hover:underline font-medium flex-shrink-0"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleRemove(h.id)}
+                    disabled={removingId === h.id}
+                    className="text-xs text-destructive hover:underline flex-shrink-0 disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    {removingId === h.id ? "Removing…" : "Remove"}
+                  </button>
+                </div>
+              )
+            )}
           </div>
         )}
       </Card>

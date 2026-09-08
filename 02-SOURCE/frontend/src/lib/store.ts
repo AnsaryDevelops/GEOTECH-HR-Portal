@@ -117,6 +117,14 @@ export interface EmployeeProfile {
   entitlements: Record<BalanceKey, number>;
   /** Monthly permission allowance, in minutes. */
   permissionMinutesPerMonth: number;
+  /**
+   * Whether this is a real production organization member vs. a legacy/test
+   * profile kept only for referential reasons. Present (always true) for a
+   * local demo employee, which has no such column; only a real,
+   * Supabase-backed employee can be false. HR Employees directory filtering
+   * only — never used for auth, routing, or any other decision.
+   */
+  isProduction?: boolean;
 }
 
 export function empName(e: EmployeeProfile): string {
