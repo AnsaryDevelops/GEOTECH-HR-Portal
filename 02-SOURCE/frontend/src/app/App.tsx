@@ -6142,20 +6142,28 @@ function OrganizationPage() {
   // relationship put them on it — the same RLS boundary every other real
   // page already respects). Demo TM/GM: unchanged, local only.
   const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
+  // Same production-visibility rule as HREmployeesPage's directoryEmployees,
+  // HRAttendancePage's activeEmployees, and HRDashboardPage's employee
+  // counts: a real session only sees production-visible real profiles
+  // (legacy/test profiles stay in the database, just excluded from this
+  // view); a demo session is unaffected.
+  const productionVisibleEmployees = session && isRemoteEmployee(session.user.id)
+    ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
+    : employees.filter((e) => !isRemoteEmployee(e.id));
   const [filterEmployee, setFilterEmployee] = useState("");
   const [filterManager, setFilterManager] = useState("");
   const [filterType, setFilterType] = useState<"" | "LEAVE" | "MISSION" | "PERMISSION">("");
   const [selected, setSelected] = useState<EmployeeProfile | null>(null);
 
   const managerName = (e: EmployeeProfile) =>
-    employees.find((m) => m.id === e.managerId)?.name ?? "—";
+    productionVisibleEmployees.find((m) => m.id === e.managerId)?.name ?? "—";
 
   // Same options pattern as the Requests filter bar: unique names, sorted.
-  const employeeOptions = Array.from(new Set(employees.map((e) => e.name))).sort();
+  const employeeOptions = Array.from(new Set(productionVisibleEmployees.map((e) => e.name))).sort();
   // Manager filter: the employee's Direct Manager (managerId), not an
   // approval-stage/current-approver concept.
   const managerOptions = Array.from(
-    new Set(employees.map((e) => managerName(e)).filter((name) => name !== "—"))
+    new Set(productionVisibleEmployees.map((e) => managerName(e)).filter((name) => name !== "—"))
   ).sort();
 
   const hasFilters = !!(filterEmployee || filterManager || filterType);
@@ -6170,7 +6178,7 @@ function OrganizationPage() {
   // is a property of a request. So the Type filter matches employees who have
   // at least one request of the selected type, using the existing requests
   // data rather than inventing a new employee-level field.
-  const rows = employees.filter((e) => {
+  const rows = productionVisibleEmployees.filter((e) => {
     if (filterEmployee && e.name !== filterEmployee) return false;
     if (filterManager && managerName(e) !== filterManager) return false;
     if (filterType && !sourceRequests.some((r) => r.employeeId === e.id && r.type === filterType)) return false;
@@ -6188,7 +6196,7 @@ function OrganizationPage() {
         </div>
         {hasFilters && (
           <p className="text-xs text-muted-foreground">
-            Showing {rows.length} of {employees.length}
+            Showing {rows.length} of {productionVisibleEmployees.length}
           </p>
         )}
       </div>
@@ -6233,9 +6241,9 @@ function OrganizationPage() {
         {hasFilters && (
           <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
             <p className="text-xs text-muted-foreground">
-              {rows.length === employees.length
+              {rows.length === productionVisibleEmployees.length
                 ? "Showing all employees"
-                : `${rows.length} of ${employees.length} employees match`}
+                : `${rows.length} of ${productionVisibleEmployees.length} employees match`}
             </p>
             <button
               onClick={clearFilters}
