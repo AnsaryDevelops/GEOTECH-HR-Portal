@@ -4194,35 +4194,51 @@ function PermissionChip() {
   );
 }
 
-type CalendarDayState = "LEAVE" | "HOLIDAY" | "PRESENT" | "WEEKEND" | "NORMAL";
+type CalendarDayState = "LEAVE_ANNUAL" | "LEAVE_OTHER" | "HOLIDAY" | "PRESENT" | "WEEKEND" | "NORMAL";
 
 const CALENDAR_DAY_STYLES: Record<CalendarDayState, string> = {
-  LEAVE: "bg-blue-50 text-blue-700",
+  LEAVE_ANNUAL: "bg-blue-50 text-blue-700",
+  LEAVE_OTHER: "bg-violet-50 text-violet-700",
   HOLIDAY: "bg-amber-50 text-amber-700",
   PRESENT: "bg-green-50 text-green-700",
   WEEKEND: "text-muted-foreground/50",
   NORMAL: "text-foreground",
 };
 
-const CALENDAR_LEGEND: { state: CalendarDayState; label: string; dot: string }[] = [
-  { state: "PRESENT", label: "Present", dot: "bg-green-500" },
-  { state: "LEAVE", label: "Annual Leave", dot: "bg-blue-500" },
-  { state: "HOLIDAY", label: "Public Holiday", dot: "bg-amber-500" },
+// Mission/Permission are shown as small dots alongside a day's primary state
+// rather than a background color — a day can have a mission or permission
+// on top of being a leave/holiday/present day, and dots let both coexist
+// without touching the existing precedence below. Colors match the ones
+// already established for these two request types on the New Request cards
+// (Mission = orange, Permission = emerald).
+const CALENDAR_LEGEND: { label: string; dot: string }[] = [
+  { label: "Present", dot: "bg-green-500" },
+  { label: "Annual Leave", dot: "bg-blue-500" },
+  { label: "Other Leave", dot: "bg-violet-500" },
+  { label: "Public Holiday", dot: "bg-amber-500" },
+  { label: "Mission", dot: "bg-orange-500" },
+  // A deeper shade than Present's own bg-green-500 — same emerald/green
+  // identity as the Permission icon on the New Request card, just dark
+  // enough that the two are never mistaken for each other as small dots.
+  { label: "Permission", dot: "bg-emerald-700" },
 ];
 
 /**
- * Small current-month snapshot for the signed-in employee's own dashboard.
- * Reuses existing data only: AttendanceRecord for Present, approved LEAVE
- * requests with balanceKey "ANNUAL" (the same bucket getLeaveBalance already
- * uses) for Annual Leave, and the existing HolidayRecord list. No new data
- * model, no per-day storage — every cell's state is derived on the fly.
+ * Month-navigable snapshot for the signed-in user's own dashboard. Reuses
+ * existing data only — AttendanceRecord for Present, approved LEAVE/MISSION/
+ * PERMISSION requests, and the existing HolidayRecord list — filtered to
+ * this user's own employeeId exactly as before, whatever role they hold.
+ * None of the underlying fetches are month-scoped, so changing the viewed
+ * month never re-fetches anything; it only changes which dates the same
+ * already-loaded data is checked against.
  *
- * Precedence when more than one applies to the same date: Annual Leave, then
- * Public Holiday, then Present, then the Friday/Saturday weekend (muted) —
- * matching the order given in the spec. A weekend day inside an approved
- * leave's own date range still reads as leave, since the leave genuinely
- * covers it; countWorkingDays (used for balance math) already excludes
- * weekends from what that leave *consumes*, which this display doesn't change.
+ * Precedence when more than one applies to the same date is unchanged from
+ * before, just with Leave split by its existing balance bucket: Annual
+ * Leave, then Other Leave (any approved leave not on the ANNUAL bucket),
+ * then Public Holiday, then Present, then the Friday/Saturday weekend
+ * (muted). Mission and Permission never override this background — they
+ * add a small dot instead, so a day that is also a mission or permission
+ * never loses its leave/holiday/present/weekend information.
  */
 function MyCalendarWidget() {
   const { session } = useAuth();
@@ -4236,24 +4252,44 @@ function MyCalendarWidget() {
   const myRequests = isReal ? realRequests : requests;
   const myHolidays = isReal ? remoteHolidays : holidays;
   const myAttendance = isReal ? realAttendance : attendance;
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
-  const todayStr = toISODate(now);
-  const monthLabel = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-  const approvedAnnualLeave = myRequests.filter(
+  const today = new Date();
+  const todayStr = toISODate(today);
+  const [viewYear, setViewYear] = useState(today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(today.getMonth());
+  const isCurrentMonth = viewYear === today.getFullYear() && viewMonth === today.getMonth();
+
+  function prevMonth() {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear((y) => y - 1); }
+    else setViewMonth((m) => m - 1);
+  }
+  function nextMonth() {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear((y) => y + 1); }
+    else setViewMonth((m) => m + 1);
+  }
+  function goToToday() {
+    setViewYear(today.getFullYear());
+    setViewMonth(today.getMonth());
+  }
+
+  const monthLabel = new Date(viewYear, viewMonth, 1).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+
+  const approvedLeave = myRequests.filter(
     (r): r is RequestRecord & { startDate: string; endDate: string } =>
-      r.employeeId === employeeId &&
-      r.type === "LEAVE" &&
-      r.status === "APPROVED" &&
-      r.balanceKey === "ANNUAL" &&
-      !!r.startDate &&
-      !!r.endDate
+      r.employeeId === employeeId && r.type === "LEAVE" && r.status === "APPROVED" && !!r.startDate && !!r.endDate
+  );
+  const approvedMissions = myRequests.filter(
+    (r): r is RequestRecord & { startDate: string; endDate: string } =>
+      r.employeeId === employeeId && r.type === "MISSION" && r.status === "APPROVED" && !!r.startDate && !!r.endDate
+  );
+  const approvedPermissions = myRequests.filter(
+    (r): r is RequestRecord & { startDate: string } =>
+      r.employeeId === employeeId && r.type === "PERMISSION" && r.status === "APPROVED" && !!r.startDate
   );
 
   function dayState(dateStr: string, weekday: number): CalendarDayState {
-    if (approvedAnnualLeave.some((r) => dateStr >= r.startDate && dateStr <= r.endDate)) return "LEAVE";
+    const leave = approvedLeave.find((r) => dateStr >= r.startDate && dateStr <= r.endDate);
+    if (leave) return leave.balanceKey === "ANNUAL" ? "LEAVE_ANNUAL" : "LEAVE_OTHER";
     if (myHolidays.some((h) => h.date === dateStr)) return "HOLIDAY";
     const record = myAttendance.find((a) => a.employeeId === employeeId && a.date === dateStr);
     if (record?.checkIn && record?.checkOut) return "PRESENT";
@@ -4261,15 +4297,45 @@ function MyCalendarWidget() {
     return "NORMAL";
   }
 
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstWeekday = new Date(year, month, 1).getDay();
+  const hasMission = (dateStr: string) => approvedMissions.some((r) => dateStr >= r.startDate && dateStr <= r.endDate);
+  const hasPermission = (dateStr: string) => approvedPermissions.some((r) => r.startDate === dateStr);
+
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const firstWeekday = new Date(viewYear, viewMonth, 1).getDay();
   const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
 
   return (
     <div className="rounded-[12px] border border-border bg-card p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-foreground">My Calendar</h3>
-        <p className="text-xs text-muted-foreground">{monthLabel}</p>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <h3 className="text-sm font-semibold text-foreground flex-shrink-0">My Calendar</h3>
+        <div className="flex items-center gap-1">
+          {!isCurrentMonth && (
+            <button
+              type="button"
+              onClick={goToToday}
+              className="text-[11px] font-medium text-primary hover:underline mr-1 flex-shrink-0"
+            >
+              Today
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={prevMonth}
+            aria-label="Previous month"
+            className="h-6 w-6 rounded-[6px] flex items-center justify-center hover:bg-muted transition-colors flex-shrink-0"
+          >
+            <ChevronLeft className="h-3.5 w-3.5 text-muted-foreground" />
+          </button>
+          <p className="text-xs text-muted-foreground text-center tabular-nums min-w-[92px]">{monthLabel}</p>
+          <button
+            type="button"
+            onClick={nextMonth}
+            aria-label="Next month"
+            className="h-6 w-6 rounded-[6px] flex items-center justify-center hover:bg-muted transition-colors flex-shrink-0"
+          >
+            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-7 gap-y-1 text-center">
@@ -4282,12 +4348,14 @@ function MyCalendarWidget() {
           <div key={`blank-${i}`} />
         ))}
         {days.map((day) => {
-          const dateStr = toISODate(new Date(year, month, day));
-          const weekday = new Date(year, month, day).getDay();
+          const dateStr = toISODate(new Date(viewYear, viewMonth, day));
+          const weekday = new Date(viewYear, viewMonth, day).getDay();
           const state = dayState(dateStr, weekday);
           const isToday = dateStr === todayStr;
+          const mission = hasMission(dateStr);
+          const permission = hasPermission(dateStr);
           return (
-            <div key={dateStr} className="flex items-center justify-center py-0.5">
+            <div key={dateStr} className="flex flex-col items-center justify-start gap-0.5 py-0.5">
               <span
                 className={cn(
                   "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums",
@@ -4297,14 +4365,18 @@ function MyCalendarWidget() {
               >
                 {day}
               </span>
+              <span className="flex items-center gap-0.5 h-1.5">
+                {mission && <span className="h-1 w-1 rounded-full bg-orange-500" aria-hidden="true" />}
+                {permission && <span className="h-1 w-1 rounded-full bg-emerald-700" aria-hidden="true" />}
+              </span>
             </div>
           );
         })}
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-3 pt-3 border-t border-border">
-        {CALENDAR_LEGEND.map(({ state, label, dot }) => (
-          <div key={state} className="flex items-center gap-1.5">
+        {CALENDAR_LEGEND.map(({ label, dot }) => (
+          <div key={label} className="flex items-center gap-1.5">
             <span className={cn("h-2 w-2 rounded-full flex-shrink-0", dot)} aria-hidden="true" />
             <span className="text-[11px] text-muted-foreground">{label}</span>
           </div>
