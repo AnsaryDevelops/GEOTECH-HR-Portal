@@ -3972,15 +3972,21 @@ function RealRequestSuccessCard({ request }: { request: RequestRecord }) {
         </p>
         <RequestTimeline request={request} />
       </div>
-      {deletable && (
-        <div className="mt-5 pt-5 border-t border-border">
-          <Button variant="destructive" onClick={() => setShowDeleteModal(true)}>
-            Delete Request
+      <div className={cn("mt-5", deletable && "pt-5 border-t border-border")}>
+        {deletable ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Button variant="destructive" onClick={() => setShowDeleteModal(true)}>
+              Delete Request
+            </Button>
+            <Button variant="primary" onClick={() => navigate("/employee/requests")}>
+              Back to My Requests
+            </Button>
+          </div>
+        ) : (
+          <Button variant="primary" onClick={() => navigate("/employee/requests")}>
+            Back to My Requests
           </Button>
-        </div>
-      )}
-      <div className="mt-5">
-        <Button variant="primary" onClick={() => navigate("/employee/requests")}>Back to My Requests</Button>
+        )}
       </div>
 
       <Modal
