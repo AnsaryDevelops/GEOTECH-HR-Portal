@@ -8026,7 +8026,15 @@ function HRAttendancePage() {
   const [saving, setSaving] = useState(false);
   const [filterMonth, setFilterMonth] = useState(currentMonthKey(new Date()));
 
-  const activeEmployees = employees.filter((e) => e.status === "ACTIVE");
+  // Same production-visibility rule as HREmployeesPage's directoryEmployees:
+  // a real HR session only sees production-visible real profiles (legacy/test
+  // profiles stay in the database, just excluded from this picker); a demo
+  // session is unaffected. `employees` itself (used elsewhere, e.g.
+  // recordAttendance's existence check) is left untouched.
+  const productionVisibleEmployees = session && isRemoteEmployee(session.user.id)
+    ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
+    : employees.filter((e) => !isRemoteEmployee(e.id));
+  const activeEmployees = productionVisibleEmployees.filter((e) => e.status === "ACTIVE");
 
   async function handleSave() {
     setSaved("");
