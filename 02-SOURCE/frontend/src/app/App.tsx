@@ -1327,6 +1327,8 @@ interface SidebarProps {
   onNavigate?: (id: string) => void;
   onLogout?: () => void;
   userName?: string;
+  /** The signed-in user's actual position/job title, shown in place of their role. */
+  position?: string;
 }
 
 export function Sidebar({
@@ -1335,6 +1337,7 @@ export function Sidebar({
   onNavigate,
   onLogout,
   userName,
+  position,
 }: SidebarProps) {
   const items = NAV_ITEMS[role];
 
@@ -1383,7 +1386,7 @@ export function Sidebar({
             <Avatar name={userName} size="sm" />
             <div className="flex-1 min-w-0">
               <p className="text-xs font-medium text-foreground truncate">{userName}</p>
-              <p className="text-xs text-muted-foreground">{role}</p>
+              <p className="text-xs text-muted-foreground truncate">{position || "—"}</p>
             </div>
           </div>
         )}
@@ -1537,6 +1540,8 @@ interface AppShellProps {
     name: string;
     role: UserRole;
     employeeNumber?: string;
+    /** Actual position/job title, shown in the sidebar in place of the role. */
+    position?: string;
   };
   children?: React.ReactNode;
   activeNavId?: string;
@@ -1584,6 +1589,7 @@ export function AppShell({
           onNavigate={onNavigate}
           onLogout={requestSignOut}
           userName={user.name}
+          position={user.position}
         />
       </div>
 
@@ -1605,6 +1611,7 @@ export function AppShell({
               }}
               onLogout={requestSignOut}
               userName={user.name}
+              position={user.position}
             />
           </div>
         </div>
@@ -3719,8 +3726,13 @@ function useSelfServiceNavId(): string {
 
 function DashboardShell({ activeNavId, pageTitle, children }: DashboardShellProps) {
   const { session, logout } = useAuth();
-  const { notifications, realNotifications, isRemoteEmployee } = useStore();
+  const { notifications, realNotifications, employees, isRemoteEmployee } = useStore();
   const navigate = useNavigate();
+
+  // Sidebar shows the signed-in user's actual position/job title, not their
+  // role — same employees lookup used elsewhere (e.g. useMyBalances) for
+  // "my own profile."
+  const me = employees.find((e) => e.id === session!.user.id);
 
   // Real user: realNotifications (Phase 6B-9), already scoped by RLS to the
   // caller's own rows. Demo user: unchanged, local notifications only.
@@ -3742,7 +3754,7 @@ function DashboardShell({ activeNavId, pageTitle, children }: DashboardShellProp
 
   return (
     <AppShell
-      user={session!.user}
+      user={{ ...session!.user, position: me?.position }}
       activeNavId={activeNavId}
       pageTitle={pageTitle}
       notificationCount={unreadCount}
