@@ -4117,24 +4117,76 @@ function RealRequestSuccessCard({ request }: { request: RequestRecord }) {
   );
 }
 
+/**
+ * Leave/Mission pre-submission Approval Chain preview, shared by
+ * LeaveRequestPage and MissionRequestPage.
+ *
+ * Real employee: derives the complete chain server-side via the
+ * preview_my_approval_chain RPC (20260908080000) — a narrow SECURITY
+ * DEFINER wrapper that calls the exact same build_approval_chain the real
+ * submission RPCs already use for auth.uid() only. This exists because the
+ * client-side reconstruction below is bound by the profiles RLS SELECT
+ * policies (self / own manager / own direct reports — 20260906140200),
+ * which do not let a normal employee's browser see far enough up the
+ * hierarchy to resolve the Technical Manager/General Manager beyond their
+ * own direct manager; the RPC has no such limit because it runs server-side
+ * as plain SQL, not through PostgREST's row-level security. Demo employee:
+ * unchanged — the existing local buildApprovalChain against the full local
+ * roster, never RLS-bound to begin with.
+ */
+function useApprovalChainPreview(): ApprovalStep[] {
+  const { session } = useAuth();
+  const { employees, isRemoteEmployee } = useStore();
+  const isReal = isRemoteEmployee(session!.user.id);
+  const [realChain, setRealChain] = useState<ApprovalStep[]>([]);
+
+  useEffect(() => {
+    if (!isReal || !isSupabaseConfigured || !supabase) return;
+    let cancelled = false;
+    supabase.rpc("preview_my_approval_chain").then(({ data, error }) => {
+      if (cancelled || error || !data) return;
+      const rows = data as { stage: number; role: string; title: string; approver_id: string; approver_name: string }[];
+      setRealChain(rows.map((row) => ({
+        stage: row.stage,
+        role: row.role as UserRole,
+        title: row.title,
+        approverId: row.approver_id,
+        approverName: row.approver_name,
+        status: "PENDING",
+      })));
+    });
+    return () => { cancelled = true; };
+  }, [isReal, session!.user.id]);
+
+  return isReal ? realChain : buildApprovalChain(employees, session!.user.id);
+}
+
 function ApproverInfo({ chain }: { chain: ApprovalStep[] }) {
   return (
     <div className="rounded-[8px] border border-border bg-muted/30 p-4">
       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
         Approval chain
       </p>
-      <div className="flex flex-col gap-3">
+      {/* Horizontal process layout — the full chain (already deduped/capped
+          at GM by buildApprovalChain) at a glance, contained within the
+          card's own width rather than growing the card vertically per stage. */}
+      <div className="flex items-start gap-1 overflow-x-auto">
         {chain.map((step, i) => (
-          <div key={step.stage} className="flex items-center gap-3">
-            <span className="text-xs font-semibold text-muted-foreground w-4 flex-shrink-0 tabular-nums">
-              {i + 1}
-            </span>
-            <Avatar name={step.approverName} size="sm" />
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-foreground truncate">{step.approverName}</p>
-              <p className="text-xs text-muted-foreground">{step.title}</p>
+          <React.Fragment key={step.stage}>
+            {i > 0 && (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 flex-shrink-0 mt-3" aria-hidden="true" />
+            )}
+            <div className="flex flex-col items-center gap-1 flex-1 min-w-[76px] text-center">
+              <div className="flex items-center gap-1">
+                <span className="text-xs font-semibold text-muted-foreground tabular-nums">
+                  {i + 1}
+                </span>
+                <Avatar name={step.approverName} size="sm" />
+              </div>
+              <p className="text-xs font-medium text-foreground truncate w-full">{step.approverName}</p>
+              <p className="text-[11px] text-muted-foreground truncate w-full">{step.title}</p>
             </div>
-          </div>
+          </React.Fragment>
         ))}
       </div>
       <p className="text-xs text-muted-foreground mt-3 pt-3 border-t border-border">
@@ -4716,15 +4768,12 @@ function LeaveRequestPage() {
 
   const isReal = isRemoteEmployee(session!.user.id);
   const manager = getManagerForEmployee(employees, session!.user.id);
-  // Preview only — the real RPC path derives the actual chain server-side
-  // from company_approval_routing, independent of this. Restricted to real
-  // employees for a real requester so the Technical Manager/General Manager
-  // role-scan inside buildApprovalChain cannot resolve to a demo person
-  // ahead of the real one (both are always "active," and the local demo
-  // roster is always present in the merged list) — a pre-existing display-only
-  // gap, exposed by enabling real submission, fixed here for the preview only.
-  const chainEmployees = isReal ? employees.filter((e) => isRemoteEmployee(e.id)) : employees;
-  const chain = buildApprovalChain(chainEmployees, session!.user.id);
+  // Preview only — see useApprovalChainPreview for why a real requester's
+  // complete chain must come from the server (preview_my_approval_chain)
+  // rather than the RLS-limited client-side employees list. The actual
+  // submission RPC derives the authoritative chain server-side regardless,
+  // independent of this preview.
+  const chain = useApprovalChainPreview();
 
   const [leaveType, setLeaveType] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -4939,12 +4988,11 @@ function MissionRequestPage() {
 
   const isReal = isRemoteEmployee(session!.user.id);
   const manager = getManagerForEmployee(employees, session!.user.id);
-  // Preview only — see LeaveRequestPage's identical fix (Phase 6B-4) for why
-  // this is restricted to real employees for a real requester: the
-  // Technical Manager/General Manager role-scan inside buildApprovalChain
-  // would otherwise resolve to a demo person ahead of the real one.
-  const chainEmployees = isReal ? employees.filter((e) => isRemoteEmployee(e.id)) : employees;
-  const chain = buildApprovalChain(chainEmployees, session!.user.id);
+  // Preview only — see LeaveRequestPage/useApprovalChainPreview for why a
+  // real requester's complete chain must come from the server
+  // (preview_my_approval_chain) rather than the RLS-limited client-side
+  // employees list.
+  const chain = useApprovalChainPreview();
 
   const [startDate, setStartDate] = useState("");
   const [startTime, setStartTime] = useState("");
