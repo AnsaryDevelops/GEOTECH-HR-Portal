@@ -6833,8 +6833,14 @@ function HRDashboardPage() {
   // unchanged, local only.
   const sourceRequests = isRemoteEmployee(session!.user.id) ? realRequests : requests;
 
-  const totalEmp = employees.length;
-  const activeEmp = employees.filter((e) => e.status === "ACTIVE").length;
+  // Same production-visibility rule as HREmployeesPage's directoryEmployees
+  // and HRAttendancePage's activeEmployees: a real HR session only counts
+  // production-visible real profiles; a demo session is unaffected.
+  const productionVisibleEmployees = session && isRemoteEmployee(session.user.id)
+    ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
+    : employees.filter((e) => !isRemoteEmployee(e.id));
+  const totalEmp = productionVisibleEmployees.length;
+  const activeEmp = productionVisibleEmployees.filter((e) => e.status === "ACTIVE").length;
   const totalReq = sourceRequests.length;
   const pending = sourceRequests.filter((r) => r.status === "PENDING").length;
   const approved = sourceRequests.filter((r) => r.status === "APPROVED").length;
