@@ -4637,14 +4637,14 @@ function NewRequestPage() {
   const navigate = useNavigate();
   return (
     <DashboardShell activeNavId={selfNavId} pageTitle="New Request">
-      <div className="max-w-2xl">
+      <div className="max-w-5xl">
         <div className="mb-8">
           <h2 className="text-xl font-semibold text-foreground">New Request</h2>
           <p className="mt-1.5 text-sm text-muted-foreground">
             Choose the type of request you want to submit.
           </p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <button
             className="group flex flex-col items-start gap-4 rounded-[12px] border-2 border-border bg-card p-6 text-left hover:border-primary hover:bg-accent/30 transition-all"
             onClick={() => navigate("/employee/new-request/leave")}
@@ -4657,7 +4657,7 @@ function NewRequestPage() {
               <p className="text-sm text-muted-foreground mt-1">Request time off from work.</p>
             </div>
             <div className="flex items-center gap-1 text-xs font-medium text-primary mt-auto">
-              Select <ChevronRight className="h-3.5 w-3.5" />
+              Select <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
             </div>
           </button>
 
@@ -4673,7 +4673,7 @@ function NewRequestPage() {
               <p className="text-sm text-muted-foreground mt-1">Request a work mission.</p>
             </div>
             <div className="flex items-center gap-1 text-xs font-medium text-primary mt-auto">
-              Select <ChevronRight className="h-3.5 w-3.5" />
+              Select <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
             </div>
           </button>
 
@@ -4691,7 +4691,7 @@ function NewRequestPage() {
               </p>
             </div>
             <div className="flex items-center gap-1 text-xs font-medium text-primary mt-auto">
-              Select <ChevronRight className="h-3.5 w-3.5" />
+              Select <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
             </div>
           </button>
         </div>
