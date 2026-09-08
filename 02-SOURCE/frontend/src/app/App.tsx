@@ -4306,7 +4306,8 @@ const CALENDAR_DAY_STYLES: Record<CalendarDayState, string> = {
 // already established for these two request types on the New Request cards
 // (Mission = orange, Permission = emerald).
 const CALENDAR_LEGEND: { label: string; dot: string }[] = [
-  { label: "Present", dot: "bg-green-500" },
+  // Same primary token as the Today ring (ring-primary) on the day cell.
+  { label: "Today", dot: "bg-primary" },
   { label: "Annual Leave", dot: "bg-blue-500" },
   { label: "Other Leave", dot: "bg-violet-500" },
   { label: "Public Holiday", dot: "bg-amber-500" },
