@@ -1388,7 +1388,7 @@ export function Sidebar({
           </div>
         )}
         <button
-          className="flex items-center gap-3 w-full px-3 py-2.5 rounded-[8px] text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className="flex items-center gap-3 w-full px-3 py-2.5 rounded-[8px] text-sm text-destructive hover:bg-muted transition-colors"
           onClick={onLogout}
         >
           <LogOut className="h-4 w-4 flex-shrink-0" />
@@ -1407,6 +1407,10 @@ interface HeaderProps {
   onNotificationsClick?: () => void;
   accessory?: React.ReactNode;
   onMenuClick?: () => void;
+  /** Account menu — "My Profile" item. Reuses the existing profile route/navigation. */
+  onProfileClick?: () => void;
+  /** Account menu — "Sign Out" item. Opens the shared sign-out confirmation (see AppShell); never signs out directly. */
+  onLogoutClick?: () => void;
 }
 
 export function Header({
@@ -1417,7 +1421,31 @@ export function Header({
   onNotificationsClick,
   onMenuClick,
   accessory,
+  onProfileClick,
+  onLogoutClick,
 }: HeaderProps) {
+  // Same outside-click-close pattern already used by DatePicker's popover.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    if (menuOpen) document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuOpen(false);
+    }
+    if (menuOpen) document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [menuOpen]);
+
   return (
     <header className="h-16 flex items-center justify-between px-6 bg-card border-b border-border flex-shrink-0">
       <div className="flex items-center gap-3">
@@ -1459,13 +1487,45 @@ export function Header({
 
         {/* User menu */}
         {userName && (
-          <button className="flex items-center gap-2.5 h-9 px-3 rounded-[8px] text-sm hover:bg-muted transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary">
-            <Avatar name={userName} size="sm" />
-            <span className="hidden md:block text-sm font-medium text-foreground max-w-[140px] truncate">
-              {userName}
-            </span>
-            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-          </button>
+          <div ref={menuRef} className="relative">
+            <button
+              className="flex items-center gap-2.5 h-9 px-3 rounded-[8px] text-sm hover:bg-muted transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+            >
+              <Avatar name={userName} size="sm" />
+              <span className="hidden md:block text-sm font-medium text-foreground max-w-[140px] truncate">
+                {userName}
+              </span>
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            </button>
+
+            {menuOpen && (
+              <div
+                role="menu"
+                aria-label="Account menu"
+                className="absolute right-0 top-full mt-1 w-44 rounded-[12px] border border-border bg-card shadow-xl py-1 z-50"
+              >
+                <button
+                  role="menuitem"
+                  type="button"
+                  className="flex w-full items-center px-3 py-2 mx-0 rounded-[6px] text-sm text-foreground hover:bg-muted transition-colors text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+                  onClick={() => { setMenuOpen(false); onProfileClick?.(); }}
+                >
+                  My Profile
+                </button>
+                <button
+                  role="menuitem"
+                  type="button"
+                  className="flex w-full items-center px-3 py-2 mx-0 rounded-[6px] text-sm text-foreground hover:bg-muted transition-colors text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+                  onClick={() => { setMenuOpen(false); onLogoutClick?.(); }}
+                >
+                  Sign Out
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </header>
@@ -1500,6 +1560,19 @@ export function AppShell({
   onLogout,
 }: AppShellProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Shared by both sign-out entry points (header account menu + sidebar):
+  // neither ever calls the real onLogout directly — both only open this
+  // confirmation, and only its own "Sign Out" button calls onLogout, so
+  // there is exactly one place that can actually end the session.
+  const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
+
+  function requestSignOut() {
+    setShowSignOutConfirm(true);
+  }
+  function confirmSignOut() {
+    setShowSignOutConfirm(false);
+    onLogout?.();
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -1509,7 +1582,7 @@ export function AppShell({
           role={user.role}
           activeId={activeNavId}
           onNavigate={onNavigate}
-          onLogout={onLogout}
+          onLogout={requestSignOut}
           userName={user.name}
         />
       </div>
@@ -1530,7 +1603,7 @@ export function AppShell({
                 onNavigate?.(id);
                 setMobileSidebarOpen(false);
               }}
-              onLogout={onLogout}
+              onLogout={requestSignOut}
               userName={user.name}
             />
           </div>
@@ -1547,11 +1620,32 @@ export function AppShell({
           onNotificationsClick={onNotificationsClick}
         accessory={accessory}
           onMenuClick={() => setMobileSidebarOpen(true)}
+          onProfileClick={() => onNavigate?.("profile")}
+          onLogoutClick={requestSignOut}
         />
         <main className="flex-1 overflow-auto p-6 lg:p-8">
           {children}
         </main>
       </div>
+
+      <Modal
+        open={showSignOutConfirm}
+        onClose={() => setShowSignOutConfirm(false)}
+        title="Sign out?"
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowSignOutConfirm(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmSignOut}>
+              Sign Out
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-muted-foreground">Are you sure you want to sign out?</p>
+      </Modal>
     </div>
   );
 }
