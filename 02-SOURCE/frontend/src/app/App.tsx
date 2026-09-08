@@ -7303,8 +7303,15 @@ function HREmployeesPage() {
         </Button>
       </div>
 
-      {/* Count */}
-      <p className="text-xs text-muted-foreground mb-3">{filtered.length} of {employees.length} employees</p>
+      {/* Count — against directoryEmployees (the same production-visible list
+          `filtered` is derived from), not the raw combined `employees`,
+          which also holds local demo employees and hidden historical/test
+          profiles that never appear in this directory. */}
+      <p className="text-xs text-muted-foreground mb-3">
+        {filtered.length === directoryEmployees.length
+          ? `${directoryEmployees.length} employee${directoryEmployees.length === 1 ? "" : "s"}`
+          : `${filtered.length} of ${directoryEmployees.length} employees`}
+      </p>
 
       {/* Table */}
       <Card padding={false}>
