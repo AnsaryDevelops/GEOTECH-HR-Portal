@@ -13,5 +13,14 @@ export default defineConfig(({ command }) => ({
   ],
   resolve: { alias: { '@': path.resolve(__dirname, './src') } },
   assetsInclude: ['**/*.svg', '**/*.csv'],
-  server: { port: 5173 },
+  // allowedHosts scopes Vite's dev-server Host-header allowlist (its anti
+  // DNS-rebinding check) to exactly the Cloudflare Quick Tunnel domain —
+  // narrower than `true` (which allows any host at all). A leading dot
+  // matches the whole *.trycloudflare.com subdomain, so this keeps working
+  // across quick-tunnel restarts (each run gets a new random subdomain)
+  // without needing to hardcode a specific hostname. LAN access via the
+  // machine's own IP is unaffected — Vite's own-IP/localhost checks are
+  // separate from this allowlist. Dev-only setting — does not apply to
+  // `vite build`/production output.
+  server: { port: 5173, allowedHosts: ['.trycloudflare.com'] },
 }))
