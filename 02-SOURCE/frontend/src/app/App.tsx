@@ -7457,7 +7457,11 @@ function HREmployeesPage() {
   // Surfaces a refused Activate/Deactivate instead of failing silently.
   const [actionError, setActionError] = useState("");
 
-  const eligibleManagers = getEligibleManagers(employees);
+  // Same production-visibility list as the directory above — Team Members
+  // and Direct Manager must only offer production-visible candidates, not
+  // the raw combined employees list (which also carries demo profiles for
+  // a real session, and legacy/test real profiles regardless of session).
+  const eligibleManagers = getEligibleManagers(directoryEmployees);
 
   // Filtering
   const q = search.toLowerCase().trim();
@@ -7796,7 +7800,7 @@ function HREmployeesPage() {
             <EmployeeForm
               initial={addForm}
               managers={eligibleManagers}
-              allEmployees={employees}
+              allEmployees={directoryEmployees}
               departments={departments}
               errors={addErrors}
               onChange={setAddForm}
@@ -7823,7 +7827,7 @@ function HREmployeesPage() {
         <EmployeeForm
           initial={editForm}
           managers={eligibleManagers.filter((m) => m.id !== editTarget?.id)}
-          allEmployees={employees}
+          allEmployees={directoryEmployees}
           departments={departments}
           errors={editErrors}
           onChange={setEditForm}
