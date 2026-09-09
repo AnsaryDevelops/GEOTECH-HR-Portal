@@ -8843,7 +8843,12 @@ function ApprovalRoutingSection() {
     setGmId(approvalRouting?.generalManagerId ?? "");
   }, [approvalRouting]);
 
-  const candidates = employees.filter((e) => isRemoteEmployee(e.id) && e.status === "ACTIVE");
+  // Same production-visibility rule already established for HREmployeesPage,
+  // HRAttendancePage, OrganizationPage, and HRDashboardPage — Technical
+  // Manager/General Manager candidates must be production-visible real
+  // employees, not the raw combined list (legacy/test real profiles stay in
+  // the database, just excluded from this selector).
+  const candidates = employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false && e.status === "ACTIVE");
 
   async function handleSave() {
     if (tmId && gmId && tmId === gmId) {
