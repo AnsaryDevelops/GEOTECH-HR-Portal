@@ -8270,24 +8270,83 @@ function HRAttendancePage() {
   const sourceRequests = isReal ? realRequests : requests;
 
   const today = toISODate(new Date());
-  const [employeeId, setEmployeeId] = useState("");
-  const [date, setDate] = useState(today);
-  const [checkIn, setCheckIn] = useState("");
-  const [checkOut, setCheckOut] = useState("");
-  const [note, setNote] = useState("");
-  const [error, setError] = useState("");
-  const [saved, setSaved] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [filterMonth, setFilterMonth] = useState(currentMonthKey(new Date()));
 
-  // Attendance Excel upload/import. Accepts .xls/.xlsx by extension and by
-  // the two standard Excel MIME types (browsers/OSes are inconsistent about
-  // which MIME type they report for .xls, so the extension check is the
-  // primary signal and the MIME check is a secondary corroboration, not a
-  // gate). Selecting a file parses it immediately (client-side, via
-  // attendanceImport.ts) to build the preview below — nothing is persisted
-  // until HR confirms with "Import Attendance", and even then the server
-  // (hr_import_attendance) — not this preview — decides what's actually new.
+  // Same production-visibility rule as HREmployeesPage's directoryEmployees:
+  // a real HR session only sees production-visible real profiles (legacy/test
+  // profiles stay in the database, just excluded from these pickers); a demo
+  // session is unaffected. `employees` itself (used elsewhere, e.g.
+  // recordAttendance's existence check) is left untouched.
+  const productionVisibleEmployees = session && isRemoteEmployee(session.user.id)
+    ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
+    : employees.filter((e) => !isRemoteEmployee(e.id));
+  const activeEmployees = productionVisibleEmployees.filter((e) => e.status === "ACTIVE");
+
+  // ─── Filter bar — "which records am I viewing?" Deliberately its own state,
+  // independent from the Add Attendance modal's target employee and the
+  // Import Excel modal's target employee (each of those answers "who am I
+  // creating/importing a record for?", a different question).
+  const [filterEmployeeId, setFilterEmployeeId] = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo, setFilterDateTo] = useState("");
+  const hasFilters = !!(filterEmployeeId || filterDateFrom || filterDateTo);
+
+  function clearFilters() {
+    setFilterEmployeeId("");
+    setFilterDateFrom("");
+    setFilterDateTo("");
+  }
+
+  const filteredRows = [...sourceAttendance]
+    .filter((a) => !filterEmployeeId || a.employeeId === filterEmployeeId)
+    .filter((a) => !filterDateFrom || a.date >= filterDateFrom)
+    .filter((a) => !filterDateTo || a.date <= filterDateTo)
+    .sort((a, b) => b.date.localeCompare(a.date) || a.employeeId.localeCompare(b.employeeId));
+
+  // ─── Add Attendance modal — manual entry. Same recordAttendance() call,
+  // same validation, same server-authoritative late/early derivation
+  // (attendance_derive_manual_minutes_trg) as before; only the container
+  // (modal instead of a permanent card) and the state variable names
+  // (manual* prefix, so this employee selection can never be confused with
+  // the filter bar's or the import modal's) changed.
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [manualEmployeeId, setManualEmployeeId] = useState("");
+  const [manualDate, setManualDate] = useState(today);
+  const [manualCheckIn, setManualCheckIn] = useState("");
+  const [manualCheckOut, setManualCheckOut] = useState("");
+  const [manualNote, setManualNote] = useState("");
+  const [manualError, setManualError] = useState("");
+  const [manualSaving, setManualSaving] = useState(false);
+  const [manualSuccessMessage, setManualSuccessMessage] = useState("");
+
+  function openAddModal() {
+    setManualEmployeeId("");
+    setManualDate(today);
+    setManualCheckIn("");
+    setManualCheckOut("");
+    setManualNote("");
+    setManualError("");
+    setShowAddModal(true);
+  }
+
+  async function handleSave() {
+    setManualSaving(true);
+    const res = await recordAttendance(
+      { employeeId: manualEmployeeId, date: manualDate, checkIn: manualCheckIn, checkOut: manualCheckOut, note: manualNote },
+      session!.user.id
+    );
+    setManualSaving(false);
+    if (!res.ok) { setManualError(res.error ?? "Could not save."); return; }
+    const who = employees.find((e) => e.id === manualEmployeeId)?.name ?? manualEmployeeId;
+    setManualSuccessMessage(`Saved ${who} for ${fmtDate(manualDate)}.`);
+    setShowAddModal(false);
+  }
+
+  // ─── Import Excel modal — same parser (attendanceImport.ts), same RPC
+  // (hr_import_attendance), same preview math as before. Only the container
+  // and the employee-selection state name (import*, independent from the
+  // filter bar and the Add Attendance modal) changed.
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importEmployeeId, setImportEmployeeId] = useState("");
   const [excelFile, setExcelFile] = useState<File | null>(null);
   const [excelFileError, setExcelFileError] = useState("");
   const excelFileInputRef = useRef<HTMLInputElement>(null);
@@ -8311,7 +8370,24 @@ function HRAttendancePage() {
     setDetectedName(null);
     setParseError("");
     setImportErrorMsg("");
+  }
+
+  function clearExcelFile() {
+    setExcelFile(null);
+    setExcelFileError("");
+    resetImportPreview();
+  }
+
+  function openImportModal() {
+    setImportEmployeeId("");
+    clearExcelFile();
     setImportResult(null);
+    setShowImportModal(true);
+  }
+
+  function closeImportModal() {
+    clearExcelFile();
+    setShowImportModal(false);
   }
 
   async function handleExcelFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -8350,34 +8426,18 @@ function HRAttendancePage() {
     }
   }
 
-  function clearExcelFile() {
-    setExcelFile(null);
-    setExcelFileError("");
-    resetImportPreview();
-  }
-
-  // Same production-visibility rule as HREmployeesPage's directoryEmployees:
-  // a real HR session only sees production-visible real profiles (legacy/test
-  // profiles stay in the database, just excluded from this picker); a demo
-  // session is unaffected. `employees` itself (used elsewhere, e.g.
-  // recordAttendance's existence check) is left untouched.
-  const productionVisibleEmployees = session && isRemoteEmployee(session.user.id)
-    ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
-    : employees.filter((e) => !isRemoteEmployee(e.id));
-  const activeEmployees = productionVisibleEmployees.filter((e) => e.status === "ACTIVE");
-
   // Import preview — every figure here is a client-side estimate for HR to
   // review before confirming. None of it is trusted for final accounting:
   // the actual insert/skip counts always come back from hr_import_attendance
   // after HR clicks "Import Attendance" (handleImportConfirm below).
-  const importTargetEmployee = employees.find((e) => e.id === employeeId);
+  const importTargetEmployee = employees.find((e) => e.id === importEmployeeId);
   const nameMismatch = !!parsedRows && !!importTargetEmployee && namesLikelyMismatch(importTargetEmployee.name, detectedName);
 
   const periodStart = parsedRows?.length ? parsedRows.reduce((min, r) => (r.date < min ? r.date : min), parsedRows[0].date) : null;
   const periodEnd = parsedRows?.length ? parsedRows.reduce((max, r) => (r.date > max ? r.date : max), parsedRows[0].date) : null;
 
   const existingDatesForEmployee = new Set(
-    sourceAttendance.filter((a) => a.employeeId === employeeId).map((a) => a.date)
+    sourceAttendance.filter((a) => a.employeeId === importEmployeeId).map((a) => a.date)
   );
   const newRows = parsedRows?.filter((r) => !existingDatesForEmployee.has(r.date)) ?? [];
   const alreadyImportedCount = (parsedRows?.length ?? 0) - newRows.length;
@@ -8406,7 +8466,7 @@ function HRAttendancePage() {
             ...sourceAttendance,
             ...newRows.map((r, i): AttendanceRecord => ({
               id: `import-preview-${i}`,
-              employeeId,
+              employeeId: importEmployeeId,
               date: r.date,
               checkIn: r.clockIn ?? undefined,
               checkOut: r.clockOut ?? undefined,
@@ -8424,11 +8484,11 @@ function HRAttendancePage() {
   const previewOverBy = previewBalance ? Math.max(0, previewBalance.used + previewBalance.held - previewBalance.allowance) : 0;
 
   async function handleImportConfirm() {
-    if (!parsedRows || !employeeId || !importTargetEmployee) return;
+    if (!parsedRows || !importEmployeeId || !importTargetEmployee) return;
     setImporting(true);
     setImportErrorMsg("");
     const res = await importAttendance(
-      employeeId,
+      importEmployeeId,
       parsedRows.map((r) => ({
         date: r.date,
         clockIn: r.clockIn,
@@ -8441,72 +8501,220 @@ function HRAttendancePage() {
     setImporting(false);
     if (!res.ok) { setImportErrorMsg(res.error); return; }
     setImportResult({ inserted: res.insertedCount, skipped: res.skippedCount, who: importTargetEmployee.name });
-    setExcelFile(null);
-    setParsedRows(null);
-    setInvalidRows([]);
-    setDetectedName(null);
-    setParseError("");
+    clearExcelFile();
+    setShowImportModal(false);
   }
 
-  async function handleSave() {
-    setSaved("");
-    setSaving(true);
-    const res = await recordAttendance({ employeeId, date, checkIn, checkOut, note }, session!.user.id);
-    setSaving(false);
-    if (!res.ok) { setError(res.error ?? "Could not save."); return; }
-    const who = employees.find((e) => e.id === employeeId)?.name ?? employeeId;
-    setError("");
-    setSaved(`Saved ${who} for ${fmtDate(date)}.`);
-    setCheckIn(""); setCheckOut(""); setNote("");
-  }
-
-  const rows = [...sourceAttendance]
-    .filter((a) => monthKey(a.date) === filterMonth)
-    .sort((a, b) => b.date.localeCompare(a.date) || a.employeeId.localeCompare(b.employeeId));
-
-  const months = Array.from(new Set([filterMonth, ...sourceAttendance.map((a) => monthKey(a.date))])).sort().reverse();
+  const tableColumns: TableColumn<AttendanceRecord>[] = [
+    {
+      key: "date",
+      header: "Date",
+      render: (a) => <span className="tabular-nums whitespace-nowrap">{fmtDate(a.date)}</span>,
+    },
+    {
+      key: "employee",
+      header: "Employee",
+      render: (a) => {
+        const emp = employees.find((e) => e.id === a.employeeId);
+        return (
+          <div className="flex items-center gap-2.5">
+            <Avatar name={emp?.name ?? a.employeeId} size="sm" />
+            <span className="font-medium text-foreground">{emp?.name ?? a.employeeId}</span>
+          </div>
+        );
+      },
+    },
+    {
+      key: "checkIn",
+      header: "Check In",
+      render: (a) => (
+        <span className={cn("tabular-nums", lateMinutes(a) > 0 && "text-destructive font-medium")}>
+          {a.checkIn ?? "—"}
+        </span>
+      ),
+    },
+    {
+      key: "checkOut",
+      header: "Check Out",
+      render: (a) => (
+        <span className={cn("tabular-nums", earlyLeaveMinutes(a) > 0 && "text-destructive font-medium")}>
+          {a.checkOut ?? "—"}
+        </span>
+      ),
+    },
+    {
+      key: "late",
+      header: "Late",
+      render: (a) =>
+        lateMinutes(a) > 0 ? (
+          <span className="tabular-nums text-destructive font-medium">{formatMinutes(lateMinutes(a))}</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
+    },
+    {
+      key: "early",
+      header: "Early",
+      render: (a) =>
+        earlyLeaveMinutes(a) > 0 ? (
+          <span className="tabular-nums text-destructive font-medium">{formatMinutes(earlyLeaveMinutes(a))}</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (a) => {
+        const absent = !a.checkIn && !a.checkOut;
+        if (absent) return <span className="text-muted-foreground">Absent</span>;
+        if (lateMinutes(a) > 0 || earlyLeaveMinutes(a) > 0) return <span className="text-destructive font-medium">Late</span>;
+        return <span className="text-muted-foreground">On Time</span>;
+      },
+    },
+    {
+      key: "source",
+      header: "Source",
+      render: (a) => (
+        <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-full border border-border bg-muted text-muted-foreground whitespace-nowrap">
+          {a.source === "IMPORT" ? "Imported" : "Manual"}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      header: "",
+      className: "text-right",
+      render: (a) => (
+        <button onClick={() => deleteAttendance(a.id)} className="text-xs text-destructive hover:underline">
+          Remove
+        </button>
+      ),
+    },
+  ];
 
   return (
     <DashboardShell activeNavId="attendance" pageTitle="Attendance">
       <div className="mb-5">
         <h2 className="text-lg font-semibold text-foreground">Attendance</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Enter the fingerprint record. Anything after {WORKDAY_START} is charged to the
-          employee's monthly permission allowance automatically.
+        <p className="text-sm text-muted-foreground mt-1">View and manage employee attendance records.</p>
+      </div>
+
+      {manualSuccessMessage && (
+        <Alert variant="success" className="mb-4">{manualSuccessMessage}</Alert>
+      )}
+      {importResult && (
+        <Alert variant="success" className="mb-4">
+          Imported {importResult.inserted} attendance record{importResult.inserted === 1 ? "" : "s"} for {importResult.who}.
+          {importResult.skipped > 0 && ` ${importResult.skipped} already existed and ${importResult.skipped === 1 ? "was" : "were"} skipped.`}
+        </Alert>
+      )}
+
+      {/* Filter bar — "which records am I viewing?" */}
+      <div className="rounded-[12px] border border-border bg-card shadow-sm p-3 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <Select label="Employee" value={filterEmployeeId} onChange={(e) => setFilterEmployeeId(e.target.value)}>
+            <option value="">All Employees</option>
+            {productionVisibleEmployees.map((e) => (
+              <option key={e.id} value={e.id}>{e.name} — {e.employeeCode ?? e.id}</option>
+            ))}
+          </Select>
+          <DatePicker label="Date From" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} placeholder="Start of range" />
+          <DatePicker label="Date To" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} placeholder="End of range" />
+          <div className="flex items-end">
+            <Button variant="secondary" onClick={clearFilters} disabled={!hasFilters} className="gap-1.5 w-full sm:w-auto">
+              <X className="h-3.5 w-3.5" /> Clear Filters
+            </Button>
+          </div>
+        </div>
+        <p className="mt-2 pt-2 border-t border-border text-xs text-muted-foreground">
+          {filteredRows.length} record{filteredRows.length === 1 ? "" : "s"}
         </p>
       </div>
 
-      <Card className="mb-6">
-        <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <Select label="Employee *" value={employeeId} onChange={(e) => { setEmployeeId(e.target.value); setError(""); }}>
-              <option value="">Select employee</option>
-              {activeEmployees.map((e) => (
-                <option key={e.id} value={e.id}>{e.name} — {e.employeeCode ?? e.id}</option>
-              ))}
-            </Select>
-            <DatePicker label="Date *" value={date} onChange={(e) => { setDate(e.target.value); setError(""); }} />
-            <TimePicker label="Check in" value={checkIn} onChange={(e) => { setCheckIn(e.target.value); setError(""); }} />
-            <TimePicker label="Check out" value={checkOut} onChange={(e) => { setCheckOut(e.target.value); setError(""); }} />
-          </div>
-          <Input label="Note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional" />
-          {error && <Alert variant="error">{error}</Alert>}
-          {saved && <Alert variant="success">{saved}</Alert>}
-          <div>
-            <Button variant="primary" onClick={handleSave} loading={saving}>Save Record</Button>
-          </div>
+      {/* Primary actions + records table — the table is the dominant element; Add/Import are compact, secondary controls that open modals instead of staying permanently visible as large cards. */}
+      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+        <h3 className="text-base font-semibold text-foreground">Attendance Records</h3>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={openAddModal} className="gap-1.5">
+            <Plus className="h-4 w-4" /> Add Attendance
+          </Button>
+          <Button variant="secondary" onClick={openImportModal} className="gap-1.5">
+            <Upload className="h-4 w-4" /> Import Excel
+          </Button>
         </div>
+      </div>
+
+      <Card padding={false}>
+        <Table
+          data={filteredRows}
+          columns={tableColumns}
+          keyExtractor={(a) => a.id}
+          className="min-w-[760px]"
+          emptyState={
+            hasFilters ? (
+              <EmptyState
+                title="No matching records"
+                description="Try adjusting your filters."
+                action={<Button variant="secondary" onClick={clearFilters}>Clear Filters</Button>}
+              />
+            ) : (
+              <EmptyState
+                title="No attendance records yet"
+                description="Add a record or import an Excel export to get started."
+              />
+            )
+          }
+        />
       </Card>
 
-      <Card className="mb-6">
-        <div className="flex flex-col gap-3">
-          <div>
-            <h3 className="text-base font-semibold text-foreground">Upload Attendance Excel</h3>
-            <p className="text-sm text-muted-foreground mt-1">
-              Upload the fingerprint attendance export (.xls or .xlsx) to calculate attendance and monthly Permission usage.
-            </p>
+      {/* Add Attendance modal — manual entry, unchanged business rules */}
+      <Modal
+        open={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        title="Add Attendance"
+        description={`Enter the employee's attendance record. Late time after ${WORKDAY_START} is automatically deducted from the employee's monthly Permission allowance.`}
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowAddModal(false)} disabled={manualSaving}>Cancel</Button>
+            <Button variant="primary" onClick={handleSave} loading={manualSaving}>Save Record</Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <Select label="Employee *" value={manualEmployeeId} onChange={(e) => { setManualEmployeeId(e.target.value); setManualError(""); }}>
+            <option value="">Select employee</option>
+            {activeEmployees.map((e) => (
+              <option key={e.id} value={e.id}>{e.name} — {e.employeeCode ?? e.id}</option>
+            ))}
+          </Select>
+          <DatePicker label="Date *" value={manualDate} onChange={(e) => { setManualDate(e.target.value); setManualError(""); }} />
+          <div className="grid grid-cols-2 gap-4">
+            <TimePicker label="Check in" value={manualCheckIn} onChange={(e) => { setManualCheckIn(e.target.value); setManualError(""); }} />
+            <TimePicker label="Check out" value={manualCheckOut} onChange={(e) => { setManualCheckOut(e.target.value); setManualError(""); }} />
           </div>
-          {!employeeId && (
+          <Input label="Note" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="Optional" />
+          {manualError && <Alert variant="error">{manualError}</Alert>}
+        </div>
+      </Modal>
+
+      {/* Import Excel modal — unchanged parser/RPC/accounting */}
+      <Modal
+        open={showImportModal}
+        onClose={closeImportModal}
+        title="Import Excel"
+        description="Upload the fingerprint attendance export (.xls or .xlsx) to calculate attendance and monthly Permission usage."
+        size="lg"
+      >
+        <div className="flex flex-col gap-4">
+          <Select label="Employee *" value={importEmployeeId} onChange={(e) => setImportEmployeeId(e.target.value)}>
+            <option value="">Select employee</option>
+            {activeEmployees.map((e) => (
+              <option key={e.id} value={e.id}>{e.name} — {e.employeeCode ?? e.id}</option>
+            ))}
+          </Select>
+          {!importEmployeeId && (
             <p className="text-sm text-muted-foreground">Select an employee above first.</p>
           )}
           <div className="flex flex-wrap items-center gap-3">
@@ -8517,13 +8725,13 @@ function HRAttendancePage() {
               onChange={handleExcelFileChange}
               className="sr-only"
               id="attendance-excel-file"
-              disabled={!employeeId}
+              disabled={!importEmployeeId}
             />
             <Button
               variant="secondary"
               onClick={() => excelFileInputRef.current?.click()}
               className="gap-1.5"
-              disabled={!employeeId || parsing}
+              disabled={!importEmployeeId || parsing}
             >
               <Upload className="h-4 w-4" /> Choose File
             </Button>
@@ -8550,16 +8758,10 @@ function HRAttendancePage() {
           </div>
           {excelFileError && <Alert variant="error">{excelFileError}</Alert>}
           {parseError && <Alert variant="error">{parseError}</Alert>}
-          {importResult && (
-            <Alert variant="success">
-              Imported {importResult.inserted} attendance record{importResult.inserted === 1 ? "" : "s"} for {importResult.who}.
-              {importResult.skipped > 0 && ` ${importResult.skipped} already existed and ${importResult.skipped === 1 ? "was" : "were"} skipped.`}
-            </Alert>
-          )}
           {importErrorMsg && <Alert variant="error">{importErrorMsg}</Alert>}
 
           {parsedRows && parsedRows.length > 0 && importTargetEmployee && (
-            <div className="mt-2 rounded-[8px] border border-border p-4 flex flex-col gap-4">
+            <div className="rounded-[8px] border border-border p-4 flex flex-col gap-4">
               <h4 className="text-sm font-semibold text-foreground">Import Attendance</h4>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
@@ -8581,7 +8783,7 @@ function HRAttendancePage() {
 
               {nameMismatch && (
                 <Alert variant="warning">
-                  <strong>⚠ Employee name mismatch.</strong> The file's Name column says "{detectedName}", but you're
+                  <strong>Employee name mismatch.</strong> The file's Name column says "{detectedName}", but you're
                   importing for {importTargetEmployee.name}. The selected employee above will be used — this file will
                   not create or affect any other employee's record.
                 </Alert>
@@ -8668,89 +8870,7 @@ function HRAttendancePage() {
             </div>
           )}
         </div>
-      </Card>
-
-      <div className="flex items-center justify-between mb-3 gap-3">
-        <h3 className="text-base font-semibold text-foreground">Records</h3>
-        <select
-          className="px-3 py-2 rounded-[8px] border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-          value={filterMonth}
-          onChange={(e) => setFilterMonth(e.target.value)}
-        >
-          {months.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
-      </div>
-
-      <Card padding={false}>
-        {rows.length === 0 ? (
-          <div className="p-6">
-            <EmptyState title="No records for this month" description="Add a record above to get started." />
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[720px]">
-              <thead>
-                <tr className="border-b border-border text-left">
-                  <th className="px-4 py-3 font-medium text-muted-foreground">Date</th>
-                  <th className="px-4 py-3 font-medium text-muted-foreground">Employee</th>
-                  <th className="px-4 py-3 font-medium text-muted-foreground">In</th>
-                  <th className="px-4 py-3 font-medium text-muted-foreground">Out</th>
-                  <th className="px-4 py-3 font-medium text-muted-foreground">Charged</th>
-                  <th className="px-4 py-3 font-medium text-muted-foreground">Remaining</th>
-                  <th className="px-4 py-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((a) => {
-                  const emp = employees.find((e) => e.id === a.employeeId);
-                  const charged = lateMinutes(a) + earlyLeaveMinutes(a);
-                  const balance = emp ? getPermissionBalance(emp, sourceRequests, sourceAttendance, monthKey(a.date)) : null;
-                  return (
-                    <tr key={a.id} className="border-b border-border/60 last:border-0">
-                      <td className="px-4 py-3 whitespace-nowrap tabular-nums">{fmtDate(a.date)}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2.5">
-                          <Avatar name={emp?.name ?? a.employeeId} size="sm" />
-                          <span className="font-medium text-foreground">{emp?.name ?? a.employeeId}</span>
-                          {a.source === "IMPORT" && (
-                            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-full border border-border bg-muted text-muted-foreground flex-shrink-0">
-                              Imported
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className={cn("px-4 py-3 tabular-nums", lateMinutes(a) > 0 && "text-destructive font-medium")}>
-                        {a.checkIn ?? "—"}
-                      </td>
-                      <td className={cn("px-4 py-3 tabular-nums", earlyLeaveMinutes(a) > 0 && "text-destructive font-medium")}>
-                        {a.checkOut ?? "—"}
-                      </td>
-                      <td className="px-4 py-3 tabular-nums">
-                        {charged > 0 ? (
-                          <span className="text-destructive font-medium">{formatMinutes(charged)}</span>
-                        ) : (
-                          <span className="text-muted-foreground">On time</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 tabular-nums text-muted-foreground">
-                        {balance ? formatMinutes(balance.available) : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={() => deleteAttendance(a.id)}
-                          className="text-xs text-destructive hover:underline"
-                        >
-                          Remove
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      </Modal>
     </DashboardShell>
   );
 }
