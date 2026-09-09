@@ -279,11 +279,26 @@ export interface AttendanceRecord {
   id: string;
   employeeId: string;
   date: string;       // YYYY-MM-DD
-  checkIn?: string;   // HH:MM
-  checkOut?: string;  // HH:MM
+  checkIn?: string;   // HH:MM — always the actual punch time, real or imported. Never synthesized.
+  checkOut?: string;  // HH:MM — always the actual punch time, real or imported. Never synthesized.
   note?: string;
   recordedBy: string;
   recordedAt: string;
+  /** MANUAL (default, including every demo/local record) or IMPORT (written by an Excel import). Absent on rows recorded before this field existed. */
+  source?: "MANUAL" | "IMPORT";
+  /**
+   * Authoritative Permission-accounting inputs (20260909110000). For a
+   * persisted Supabase record these always come from the DB — server-derived
+   * from check_in/check_out for MANUAL rows (attendance_derive_manual_minutes_trg),
+   * verbatim from the Excel's own columns for IMPORT rows. Undefined only for
+   * legacy/demo local records that predate this field — lateMinutes()/
+   * earlyLeaveMinutes() below fall back to deriving from checkIn/checkOut for
+   * those, never for a real persisted record.
+   */
+  lateMinutes?: number;
+  earlyMinutes?: number;
+  /** Reporting only — never read by getPermissionBalance. Always 0 for MANUAL rows. */
+  overtimeMinutes?: number;
 }
 
 export function minutesOfDay(time: string): number {
@@ -302,14 +317,25 @@ export function formatMinutes(total: number): string {
   return `${sign}${h}h ${m}m`;
 }
 
-/** Minutes late past WORKDAY_START. Clock in at 09:04 and this returns 4. */
+/**
+ * Minutes late — the authoritative per-row Permission-accounting figure.
+ * Prefers the stored record.lateMinutes (always present on a real Supabase
+ * row: server-derived for MANUAL, verbatim from the Excel for IMPORT — see
+ * AttendanceRecord.lateMinutes). Only derives from checkIn vs WORKDAY_START
+ * when the field is absent, which happens solely for legacy/demo local
+ * records created before this field existed. A real persisted record's
+ * lateMinutes is never re-derived here — that would let stale/incorrect
+ * client math override the server's own authoritative value.
+ */
 export function lateMinutes(record: AttendanceRecord): number {
+  if (record.lateMinutes !== undefined) return record.lateMinutes;
   if (!record.checkIn) return 0;
   return Math.max(0, minutesOfDay(record.checkIn) - minutesOfDay(WORKDAY_START));
 }
 
-/** Minutes left before WORKDAY_END. */
+/** Minutes left early — see lateMinutes for the same stored-value-first rule. */
 export function earlyLeaveMinutes(record: AttendanceRecord): number {
+  if (record.earlyMinutes !== undefined) return record.earlyMinutes;
   if (!record.checkOut) return 0;
   return Math.max(0, minutesOfDay(WORKDAY_END) - minutesOfDay(record.checkOut));
 }

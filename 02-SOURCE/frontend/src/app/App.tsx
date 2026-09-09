@@ -89,6 +89,8 @@ import {
   adminUpdateEmployeePassword,
 } from "../lib/auth";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
+import { parseAttendanceWorkbook, namesLikelyMismatch } from "../lib/attendanceImport";
+import type { ParsedAttendanceRow, AttendanceRowError } from "../lib/attendanceImport";
 import companyLogoSrc from "../imports/GEO_Egypt_LOGO-01.png";
 import type { Session } from "../lib/auth";
 import { clsx, type ClassValue } from "clsx";
@@ -1958,6 +1960,25 @@ interface StoreContextValue {
   /** Real path is HR-only (attendance_delete_hr RLS re-enforces server-side); demo path unchanged. */
   deleteAttendance: (id: string) => Promise<void>;
   /**
+   * Excel-import path. Real HR only; no demo equivalent. Delegates to
+   * hr_import_attendance (20260909110000), which stores the row's ACTUAL
+   * Clock In/Clock Out verbatim (never synthesized) alongside the Excel's
+   * own explicit late/early/overtime minutes — never re-derived from
+   * Clock In/Clock Out. Idempotent via the table's existing UNIQUE
+   * (employee_id, date): re-importing the same rows returns insertedCount: 0.
+   */
+  importAttendance: (
+    employeeId: string,
+    rows: {
+      date: string;
+      clockIn: string | null;
+      clockOut: string | null;
+      lateMinutes: number;
+      earlyMinutes: number;
+      overtimeMinutes: number;
+    }[]
+  ) => Promise<{ ok: true; insertedCount: number; skippedCount: number } | { ok: false; error: string }>;
+  /**
    * Real path is HR-only (public_holidays_insert_hr RLS re-enforces
    * server-side); demo path unchanged since before Phase 6B-2. Public
    * Holidays has no archive/inactive concept in either layer — add/remove/
@@ -2151,6 +2172,10 @@ function mapAttendanceRowToAttendanceRecord(row: {
   note: string | null;
   recorded_by: string;
   recorded_at: string;
+  source?: string | null;
+  late_minutes?: number | null;
+  early_minutes?: number | null;
+  overtime_minutes?: number | null;
 }): AttendanceRecord {
   return {
     id: row.id,
@@ -2161,6 +2186,10 @@ function mapAttendanceRowToAttendanceRecord(row: {
     note: row.note ?? undefined,
     recordedBy: row.recorded_by,
     recordedAt: row.recorded_at,
+    source: row.source === "IMPORT" ? "IMPORT" : "MANUAL",
+    lateMinutes: row.late_minutes ?? 0,
+    earlyMinutes: row.early_minutes ?? 0,
+    overtimeMinutes: row.overtime_minutes ?? 0,
   };
 }
 
@@ -2514,7 +2543,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     try {
       const { data, error } = await supabase
         .from("attendance")
-        .select("id, employee_id, date, check_in, check_out, note, recorded_by, recorded_at")
+        .select("id, employee_id, date, check_in, check_out, note, recorded_by, recorded_at, source, late_minutes, early_minutes, overtime_minutes")
         .order("date", { ascending: false });
       if (error || !data) {
         setRealAttendance([]);
@@ -2973,6 +3002,47 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       return;
     }
     mutate((p) => ({ ...p, attendance: p.attendance.filter((a) => a.id !== id) }));
+  }
+
+  // Attendance Excel import (real HR only — demo mode has no fingerprint
+  // export to import). hr_import_attendance (20260909110000) stores each
+  // row's ACTUAL clock_in/clock_out verbatim alongside the Excel's own
+  // explicit late/early/overtime minutes — nothing here synthesizes a
+  // timestamp or trusts a client-side balance total; the RPC's
+  // inserted/skipped counts and a fetchRealAttendance() refetch are the
+  // only things the caller acts on afterward.
+  async function importAttendance(
+    employeeId: string,
+    rows: {
+      date: string;
+      clockIn: string | null;
+      clockOut: string | null;
+      lateMinutes: number;
+      earlyMinutes: number;
+      overtimeMinutes: number;
+    }[]
+  ): Promise<{ ok: true; insertedCount: number; skippedCount: number } | { ok: false; error: string }> {
+    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    if (!session || !isRemoteEmployee(session.user.id)) {
+      return { ok: false, error: "Attendance import is only available for a signed-in HR account." };
+    }
+
+    const { data, error } = await supabase.rpc("hr_import_attendance", {
+      p_employee_id: employeeId,
+      p_rows: rows.map((r) => ({
+        date: r.date,
+        clock_in: r.clockIn,
+        clock_out: r.clockOut,
+        late_minutes: r.lateMinutes,
+        early_minutes: r.earlyMinutes,
+        overtime_minutes: r.overtimeMinutes,
+      })),
+    });
+    if (error) return { ok: false, error: error.message };
+
+    const result = Array.isArray(data) ? data[0] : data;
+    await fetchRealAttendance();
+    return { ok: true, insertedCount: result?.inserted_count ?? 0, skippedCount: result?.skipped_count ?? 0 };
   }
 
   // Real path is HR-only (public_holidays_insert_hr RLS re-checks this
@@ -3612,7 +3682,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       createLeaveRequest, submitRealLeaveRequest,
       createMissionRequest, submitRealMissionRequest,
       createPermissionRequest, submitRealPermissionRequest,
-      recordAttendance, deleteAttendance, createHoliday, deleteHoliday, updateHoliday,
+      recordAttendance, deleteAttendance, importAttendance, createHoliday, deleteHoliday, updateHoliday,
       approveRequest, rejectRequest, deleteRequest, deleteRealRequest, decideRealRequest, markNotificationRead, markAllNotificationsRead,
       realNotifications, markRealNotificationRead, markAllRealNotificationsRead,
       createEmployee, updateEmployee, isRemoteEmployee, createLeaveType, updateLeaveType,
@@ -8188,7 +8258,7 @@ function HRNotificationsPage() {
 // there is nothing to remember to run afterwards.
 
 function HRAttendancePage() {
-  const { employees, attendance, realAttendance, requests, realRequests, recordAttendance, deleteAttendance, isRemoteEmployee } = useStore();
+  const { employees, attendance, realAttendance, requests, realRequests, recordAttendance, deleteAttendance, importAttendance, isRemoteEmployee } = useStore();
   const { session } = useAuth();
 
   // Real HR: realAttendance (Phase 6B-10), already scoped by RLS to every
@@ -8210,12 +8280,14 @@ function HRAttendancePage() {
   const [saving, setSaving] = useState(false);
   const [filterMonth, setFilterMonth] = useState(currentMonthKey(new Date()));
 
-  // Attendance Excel upload — file selection only. No parsing, no import,
-  // no persistence yet; the file is only held in memory for the future
-  // "Preview Import" step. Accepts .xls/.xlsx by extension and by the two
-  // standard Excel MIME types (browsers/OSes are inconsistent about which
-  // MIME type they report for .xls, so the extension check is the primary
-  // signal and the MIME check is a secondary corroboration, not a gate).
+  // Attendance Excel upload/import. Accepts .xls/.xlsx by extension and by
+  // the two standard Excel MIME types (browsers/OSes are inconsistent about
+  // which MIME type they report for .xls, so the extension check is the
+  // primary signal and the MIME check is a secondary corroboration, not a
+  // gate). Selecting a file parses it immediately (client-side, via
+  // attendanceImport.ts) to build the preview below — nothing is persisted
+  // until HR confirms with "Import Attendance", and even then the server
+  // (hr_import_attendance) — not this preview — decides what's actually new.
   const [excelFile, setExcelFile] = useState<File | null>(null);
   const [excelFileError, setExcelFileError] = useState("");
   const excelFileInputRef = useRef<HTMLInputElement>(null);
@@ -8224,10 +8296,29 @@ function HRAttendancePage() {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ];
 
-  function handleExcelFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  const [parsing, setParsing] = useState(false);
+  const [parseError, setParseError] = useState("");
+  const [parsedRows, setParsedRows] = useState<ParsedAttendanceRow[] | null>(null);
+  const [invalidRows, setInvalidRows] = useState<AttendanceRowError[]>([]);
+  const [detectedName, setDetectedName] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importErrorMsg, setImportErrorMsg] = useState("");
+  const [importResult, setImportResult] = useState<{ inserted: number; skipped: number; who: string } | null>(null);
+
+  function resetImportPreview() {
+    setParsedRows(null);
+    setInvalidRows([]);
+    setDetectedName(null);
+    setParseError("");
+    setImportErrorMsg("");
+    setImportResult(null);
+  }
+
+  async function handleExcelFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file after clearing
     if (!file) return;
+    resetImportPreview();
     const isXlsExt = /\.(xls|xlsx)$/i.test(file.name);
     const isExcelMime = file.type === "" || EXCEL_MIME_TYPES.includes(file.type);
     if (!isXlsExt || !isExcelMime) {
@@ -8237,11 +8328,32 @@ function HRAttendancePage() {
     }
     setExcelFileError("");
     setExcelFile(file);
+
+    setParsing(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const result = parseAttendanceWorkbook(buffer);
+      if (!result.ok) {
+        setParseError(result.error);
+      } else if (result.rows.length === 0) {
+        setParseError("No valid attendance rows were found in this file.");
+        setInvalidRows(result.invalidRows);
+      } else {
+        setParsedRows(result.rows);
+        setInvalidRows(result.invalidRows);
+        setDetectedName(result.detectedName);
+      }
+    } catch {
+      setParseError("Could not read this file. Please make sure it's a valid .xls or .xlsx attendance export.");
+    } finally {
+      setParsing(false);
+    }
   }
 
   function clearExcelFile() {
     setExcelFile(null);
     setExcelFileError("");
+    resetImportPreview();
   }
 
   // Same production-visibility rule as HREmployeesPage's directoryEmployees:
@@ -8253,6 +8365,88 @@ function HRAttendancePage() {
     ? employees.filter((e) => isRemoteEmployee(e.id) && e.isProduction !== false)
     : employees.filter((e) => !isRemoteEmployee(e.id));
   const activeEmployees = productionVisibleEmployees.filter((e) => e.status === "ACTIVE");
+
+  // Import preview — every figure here is a client-side estimate for HR to
+  // review before confirming. None of it is trusted for final accounting:
+  // the actual insert/skip counts always come back from hr_import_attendance
+  // after HR clicks "Import Attendance" (handleImportConfirm below).
+  const importTargetEmployee = employees.find((e) => e.id === employeeId);
+  const nameMismatch = !!parsedRows && !!importTargetEmployee && namesLikelyMismatch(importTargetEmployee.name, detectedName);
+
+  const periodStart = parsedRows?.length ? parsedRows.reduce((min, r) => (r.date < min ? r.date : min), parsedRows[0].date) : null;
+  const periodEnd = parsedRows?.length ? parsedRows.reduce((max, r) => (r.date > max ? r.date : max), parsedRows[0].date) : null;
+
+  const existingDatesForEmployee = new Set(
+    sourceAttendance.filter((a) => a.employeeId === employeeId).map((a) => a.date)
+  );
+  const newRows = parsedRows?.filter((r) => !existingDatesForEmployee.has(r.date)) ?? [];
+  const alreadyImportedCount = (parsedRows?.length ?? 0) - newRows.length;
+
+  const summaryLate = parsedRows?.reduce((s, r) => s + r.lateMinutes, 0) ?? 0;
+  const summaryEarly = parsedRows?.reduce((s, r) => s + r.earlyMinutes, 0) ?? 0;
+  const summaryOvertime = parsedRows?.reduce((s, r) => s + r.overtimeMinutes, 0) ?? 0;
+  const summaryAbsentDays = parsedRows?.filter((r) => r.isAbsent).length ?? 0;
+
+  // Simulated post-import Permission balance: feeds the exact same
+  // getPermissionBalance the rest of the app already uses (header,
+  // dashboard, Records table) a merged array of real attendance + not-yet-
+  // persisted new rows. The preview rows carry the file's actual
+  // checkIn/checkOut (never synthesized) plus its explicit lateMinutes/
+  // earlyMinutes — lateMinutes()/earlyLeaveMinutes() read those stored
+  // fields directly (store.ts), so this is the same one formula the server
+  // uses, just evaluated against not-yet-persisted rows. Preview-only — the
+  // real number always comes from a fresh fetchRealAttendance() after import.
+  const previewMonth = periodStart ? monthKey(periodStart) : null;
+  const previewBalance =
+    importTargetEmployee && previewMonth
+      ? getPermissionBalance(
+          importTargetEmployee,
+          sourceRequests,
+          [
+            ...sourceAttendance,
+            ...newRows.map((r, i): AttendanceRecord => ({
+              id: `import-preview-${i}`,
+              employeeId,
+              date: r.date,
+              checkIn: r.clockIn ?? undefined,
+              checkOut: r.clockOut ?? undefined,
+              lateMinutes: r.lateMinutes,
+              earlyMinutes: r.earlyMinutes,
+              overtimeMinutes: r.overtimeMinutes,
+              source: "IMPORT",
+              recordedBy: session!.user.id,
+              recordedAt: new Date().toISOString(),
+            })),
+          ],
+          previewMonth
+        )
+      : null;
+  const previewOverBy = previewBalance ? Math.max(0, previewBalance.used + previewBalance.held - previewBalance.allowance) : 0;
+
+  async function handleImportConfirm() {
+    if (!parsedRows || !employeeId || !importTargetEmployee) return;
+    setImporting(true);
+    setImportErrorMsg("");
+    const res = await importAttendance(
+      employeeId,
+      parsedRows.map((r) => ({
+        date: r.date,
+        clockIn: r.clockIn,
+        clockOut: r.clockOut,
+        lateMinutes: r.lateMinutes,
+        earlyMinutes: r.earlyMinutes,
+        overtimeMinutes: r.overtimeMinutes,
+      }))
+    );
+    setImporting(false);
+    if (!res.ok) { setImportErrorMsg(res.error); return; }
+    setImportResult({ inserted: res.insertedCount, skipped: res.skippedCount, who: importTargetEmployee.name });
+    setExcelFile(null);
+    setParsedRows(null);
+    setInvalidRows([]);
+    setDetectedName(null);
+    setParseError("");
+  }
 
   async function handleSave() {
     setSaved("");
@@ -8309,10 +8503,13 @@ function HRAttendancePage() {
           <div>
             <h3 className="text-base font-semibold text-foreground">Upload Attendance Excel</h3>
             <p className="text-sm text-muted-foreground mt-1">
-              Select an exported attendance file (.xls or .xlsx). Import isn't available yet — this only selects the file.
+              Upload the fingerprint attendance export (.xls or .xlsx) to calculate attendance and monthly Permission usage.
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          {!employeeId && (
+            <p className="text-sm text-muted-foreground">Select an employee above first.</p>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
             <input
               ref={excelFileInputRef}
               type="file"
@@ -8320,17 +8517,23 @@ function HRAttendancePage() {
               onChange={handleExcelFileChange}
               className="sr-only"
               id="attendance-excel-file"
+              disabled={!employeeId}
             />
-            <Button variant="secondary" onClick={() => excelFileInputRef.current?.click()} className="gap-1.5">
+            <Button
+              variant="secondary"
+              onClick={() => excelFileInputRef.current?.click()}
+              className="gap-1.5"
+              disabled={!employeeId || parsing}
+            >
               <Upload className="h-4 w-4" /> Choose File
             </Button>
             {excelFile ? (
-              <span className="flex items-center gap-2 text-sm text-foreground">
+              <span className="flex items-center gap-2 text-sm text-foreground break-all">
                 {excelFile.name}
                 <button
                   type="button"
                   onClick={clearExcelFile}
-                  className="text-muted-foreground hover:text-foreground rounded-full p-0.5 hover:bg-muted transition-colors"
+                  className="text-muted-foreground hover:text-foreground rounded-full p-0.5 hover:bg-muted transition-colors flex-shrink-0"
                   aria-label={`Remove ${excelFile.name}`}
                 >
                   <X className="h-3.5 w-3.5" />
@@ -8339,8 +8542,131 @@ function HRAttendancePage() {
             ) : (
               <span className="text-sm text-muted-foreground">No file selected</span>
             )}
+            {parsing && (
+              <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading attendance file…
+              </span>
+            )}
           </div>
           {excelFileError && <Alert variant="error">{excelFileError}</Alert>}
+          {parseError && <Alert variant="error">{parseError}</Alert>}
+          {importResult && (
+            <Alert variant="success">
+              Imported {importResult.inserted} attendance record{importResult.inserted === 1 ? "" : "s"} for {importResult.who}.
+              {importResult.skipped > 0 && ` ${importResult.skipped} already existed and ${importResult.skipped === 1 ? "was" : "were"} skipped.`}
+            </Alert>
+          )}
+          {importErrorMsg && <Alert variant="error">{importErrorMsg}</Alert>}
+
+          {parsedRows && parsedRows.length > 0 && importTargetEmployee && (
+            <div className="mt-2 rounded-[8px] border border-border p-4 flex flex-col gap-4">
+              <h4 className="text-sm font-semibold text-foreground">Import Attendance</h4>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Employee</span>{" "}
+                  <span className="font-medium text-foreground">{importTargetEmployee.name}</span>
+                </div>
+                <div className="break-all">
+                  <span className="text-muted-foreground">File</span>{" "}
+                  <span className="font-medium text-foreground">{excelFile?.name}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Attendance period</span>{" "}
+                  <span className="font-medium text-foreground">
+                    {periodStart && fmtDate(periodStart)} – {periodEnd && fmtDate(periodEnd)}
+                  </span>
+                </div>
+              </div>
+
+              {nameMismatch && (
+                <Alert variant="warning">
+                  <strong>⚠ Employee name mismatch.</strong> The file's Name column says "{detectedName}", but you're
+                  importing for {importTargetEmployee.name}. The selected employee above will be used — this file will
+                  not create or affect any other employee's record.
+                </Alert>
+              )}
+
+              {invalidRows.length > 0 && (
+                <Alert variant="warning">
+                  <strong>{invalidRows.length} row{invalidRows.length === 1 ? "" : "s"} could not be read</strong> and
+                  will be skipped: {invalidRows.slice(0, 5).map((r) => r.message).join(" ")}
+                  {invalidRows.length > 5 && ` (+${invalidRows.length - 5} more)`}
+                </Alert>
+              )}
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+                <div className="rounded-[6px] bg-muted/50 p-3">
+                  <div className="text-muted-foreground">Records detected</div>
+                  <div className="font-semibold text-foreground tabular-nums">{parsedRows.length}</div>
+                </div>
+                <div className="rounded-[6px] bg-muted/50 p-3">
+                  <div className="text-muted-foreground">New records</div>
+                  <div className="font-semibold text-foreground tabular-nums">{newRows.length}</div>
+                </div>
+                <div className="rounded-[6px] bg-muted/50 p-3">
+                  <div className="text-muted-foreground">Already imported</div>
+                  <div className="font-semibold text-foreground tabular-nums">{alreadyImportedCount}</div>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-sm font-medium text-foreground mb-2">Attendance summary</div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                  <div>
+                    <div className="text-muted-foreground">Late</div>
+                    <div className={cn("font-medium tabular-nums", summaryLate > 0 && "text-destructive")}>{formatMinutes(summaryLate)}</div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Early</div>
+                    <div className={cn("font-medium tabular-nums", summaryEarly > 0 && "text-destructive")}>{formatMinutes(summaryEarly)}</div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Overtime</div>
+                    <div className="font-medium tabular-nums text-foreground">{formatMinutes(summaryOvertime)}</div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Absent</div>
+                    <div className="font-medium tabular-nums text-foreground">{summaryAbsentDays} day{summaryAbsentDays === 1 ? "" : "s"}</div>
+                  </div>
+                </div>
+              </div>
+
+              {previewBalance && (
+                <div>
+                  <div className="text-sm font-medium text-foreground mb-2">Permission impact ({previewMonth})</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+                    <div>
+                      <div className="text-muted-foreground">Allowance</div>
+                      <div className="font-medium tabular-nums text-foreground">{formatMinutes(previewBalance.allowance)}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">Usage</div>
+                      <div className="font-medium tabular-nums text-foreground">{formatMinutes(previewBalance.used + previewBalance.held)}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">Remaining</div>
+                      <div className={cn("font-medium tabular-nums", previewOverBy > 0 ? "text-destructive" : "text-foreground")}>
+                        {formatMinutes(previewBalance.available)}
+                      </div>
+                    </div>
+                  </div>
+                  {previewOverBy > 0 && (
+                    <p className="text-sm text-destructive mt-2">Over allowance by {formatMinutes(previewOverBy)}.</p>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3">
+                <Button variant="primary" onClick={handleImportConfirm} loading={importing}>
+                  {importing ? "Importing attendance…" : "Import Attendance"}
+                </Button>
+                <Button variant="secondary" onClick={clearExcelFile} disabled={importing}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </Card>
 
@@ -8386,6 +8712,11 @@ function HRAttendancePage() {
                         <div className="flex items-center gap-2.5">
                           <Avatar name={emp?.name ?? a.employeeId} size="sm" />
                           <span className="font-medium text-foreground">{emp?.name ?? a.employeeId}</span>
+                          {a.source === "IMPORT" && (
+                            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-full border border-border bg-muted text-muted-foreground flex-shrink-0">
+                              Imported
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className={cn("px-4 py-3 tabular-nums", lateMinutes(a) > 0 && "text-destructive font-medium")}>
