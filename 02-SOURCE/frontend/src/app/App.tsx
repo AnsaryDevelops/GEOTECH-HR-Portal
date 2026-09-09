@@ -1801,10 +1801,19 @@ interface StoreContextValue {
    * `store.attendance`, unconditionally local/demo.
    */
   realAttendance: AttendanceRecord[];
-  /** Local/demo public holidays — unconditionally `store.holidays`. Leave/Permission submission and the calendar widget read this, unchanged since before Phase 6B-2. */
+  /** Local/demo public holidays — unconditionally `store.holidays`. The demo leave/permission submission path reads this; a real session's leave submission, calendar widget, and HolidaysSection all read `remoteHolidays` instead. */
   holidays: HolidayRecord[];
-  /** Real, Supabase-backed public holidays (Phase 6B-2) — see supabase/migrations/20260906130500_public_holidays.sql. Only HolidaysSection's management UI reads this, for a real HR session. */
+  /** Real, Supabase-backed public holidays (Phase 6B-2) — see supabase/migrations/20260906130500_public_holidays.sql. Read by HolidaysSection's management UI, MyCalendarWidget, and NewRequestPage, all for a real session. */
   remoteHolidays: HolidayRecord[];
+  /**
+   * Status of the most recent remoteHolidays fetch — same "loading" |
+   * "error" | "success" contract as remoteLeaveTypesStatus, for the same
+   * reason: remoteHolidays === [] used to mean "still loading", "genuinely
+   * empty", and "fetch failed" indistinguishably.
+   */
+  remoteHolidaysStatus: "loading" | "error" | "success";
+  /** Re-runs the remoteHolidays fetch — used as the Public Holidays error state's Retry action. */
+  fetchRemoteHolidays: () => Promise<void>;
   /**
    * The signed-in real user's own leave_allocations for the current calendar
    * year (Phase 6B-3) — {ANNUAL:0,CASUAL:0} for a demo session, an
@@ -2337,18 +2346,19 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
 
   // Real, Supabase-backed public holidays (Phase 6B-2) — exposed as its own
   // context field, deliberately separate from `holidays` (which stays
-  // exactly `store.holidays`, unconditionally local). Leave/Permission
-  // submission and the calendar widget are NOT part of this phase — they
-  // still read the local list for every employee, real or demo, exactly as
-  // before. Only HolidaysSection's management UI reads this, and only for a
-  // real HR session — see HolidaysSection's own real-vs-demo switch.
+  // exactly `store.holidays`, unconditionally local). Read by
+  // HolidaysSection's management UI, MyCalendarWidget, and NewRequestPage,
+  // all for a real session — see each one's own real-vs-demo switch.
   const [remoteHolidays, setRemoteHolidays] = useState<HolidayRecord[]>([]);
+  const [remoteHolidaysStatus, setRemoteHolidaysStatus] = useState<"loading" | "error" | "success">("loading");
 
   const fetchRemoteHolidays = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) {
       setRemoteHolidays([]);
+      setRemoteHolidaysStatus("success");
       return;
     }
+    setRemoteHolidaysStatus("loading");
     try {
       const { data, error } = await supabase
         .from("public_holidays")
@@ -2356,11 +2366,14 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
         .order("date");
       if (error || !data) {
         setRemoteHolidays([]);
+        setRemoteHolidaysStatus("error");
         return;
       }
       setRemoteHolidays(data as HolidayRecord[]);
+      setRemoteHolidaysStatus("success");
     } catch {
       setRemoteHolidays([]);
+      setRemoteHolidaysStatus("error");
     }
   }, []);
 
@@ -3692,7 +3705,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     <StoreCtx.Provider value={{
       requests: store.requests, realRequests, notifications: store.notifications,
       employees, leaveTypes: store.leaveTypes, remoteLeaveTypes, remoteLeaveTypesStatus, fetchRemoteLeaveTypes,
-      attendance: store.attendance, realAttendance, holidays: store.holidays, remoteHolidays,
+      attendance: store.attendance, realAttendance, holidays: store.holidays, remoteHolidays, remoteHolidaysStatus, fetchRemoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
       departments, approvalRouting,
       createLeaveRequest, submitRealLeaveRequest,
@@ -9127,19 +9140,24 @@ function HRSettingsPage() {
 // leave types. Islamic dates shift every year, which is why they are data.
 function HolidaysSection() {
   const { session } = useAuth();
-  const { holidays: localHolidays, remoteHolidays, createHoliday, deleteHoliday, updateHoliday, isRemoteEmployee } = useStore();
+  const { holidays: localHolidays, remoteHolidays, remoteHolidaysStatus, fetchRemoteHolidays, createHoliday, deleteHoliday, updateHoliday, isRemoteEmployee } = useStore();
   // Real HR (e.g. TESTHR01) manages the real Supabase list; a local demo HR
   // account keeps managing the existing local one, unaffected — same
-  // isolation rule as Phase 6B-1 Leave Types.
-  const holidays = session && isRemoteEmployee(session.user.id) ? remoteHolidays : localHolidays;
+  // isolation rule as Phase 6B-1 Leave Types. remoteHolidaysStatus only
+  // matters on the real path — the demo list is a synchronous local array,
+  // never "loading" or "errored".
+  const isReal = !!session && isRemoteEmployee(session.user.id);
+  const holidays = isReal ? remoteHolidays : localHolidays;
 
   const [date, setDate] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [removeError, setRemoveError] = useState("");
-  const [removingId, setRemovingId] = useState("");
+  // Page-level confirmation shown after a successful Add or Edit — cleared
+  // whenever another Add/Edit is started, so a stale message never lingers
+  // across a different operation.
+  const [successMessage, setSuccessMessage] = useState("");
 
   const [editTarget, setEditTarget] = useState<HolidayRecord | null>(null);
   const [editDate, setEditDate] = useState("");
@@ -9147,20 +9165,47 @@ function HolidaysSection() {
   const [editError, setEditError] = useState("");
   const [editSaving, setEditSaving] = useState(false);
 
+  // Remove confirmation — removeTarget holds the actual HolidayRecord (not
+  // just an id) captured at the moment "Remove" is clicked, so the dialog's
+  // message and the eventual delete both always refer to the same row,
+  // regardless of any list re-render in between.
+  const [removeTarget, setRemoveTarget] = useState<HolidayRecord | null>(null);
+  const [removeError, setRemoveError] = useState("");
+  const [removing, setRemoving] = useState(false);
+
+  function toggleAddForm() {
+    setOpen((v) => !v);
+    setError("");
+    setSuccessMessage("");
+  }
+
   async function handleAdd() {
     setSaving(true);
     const res = await createHoliday(date, name);
     setSaving(false);
     if (!res.ok) { setError(res.error ?? "Could not add that holiday."); return; }
     setDate(""); setName(""); setError(""); setOpen(false);
+    setSuccessMessage("Public holiday added successfully.");
   }
 
-  async function handleRemove(id: string) {
+  function openRemoveConfirm(h: HolidayRecord) {
+    setRemoveTarget(h);
     setRemoveError("");
-    setRemovingId(id);
-    const res = await deleteHoliday(id);
-    setRemovingId("");
-    if (!res.ok) setRemoveError(res.error ?? "Could not remove that holiday.");
+  }
+
+  function closeRemoveConfirm() {
+    setRemoveTarget(null);
+    setRemoveError("");
+  }
+
+  async function handleRemoveConfirm() {
+    if (!removeTarget) return;
+    setRemoving(true);
+    const res = await deleteHoliday(removeTarget.id);
+    setRemoving(false);
+    if (!res.ok) { setRemoveError(res.error ?? "Could not remove that holiday."); return; }
+    setRemoveTarget(null);
+    setRemoveError("");
   }
 
   function openEdit(h: HolidayRecord) {
@@ -9168,6 +9213,7 @@ function HolidaysSection() {
     setEditDate(h.date);
     setEditName(h.name);
     setEditError("");
+    setSuccessMessage("");
   }
 
   async function handleEditSave() {
@@ -9177,6 +9223,7 @@ function HolidaysSection() {
     setEditSaving(false);
     if (!res.ok) { setEditError(res.error ?? "Could not save changes."); return; }
     setEditTarget(null); setEditDate(""); setEditName(""); setEditError("");
+    setSuccessMessage("Public holiday updated successfully.");
   }
 
   return (
@@ -9188,10 +9235,12 @@ function HolidaysSection() {
             Weekends are Friday and Saturday. These days, and weekends, never consume leave balance.
           </p>
         </div>
-        <Button variant="secondary" onClick={() => setOpen((v) => !v)}>
+        <Button variant="secondary" onClick={toggleAddForm}>
           <Plus className="h-4 w-4" /> Add Holiday
         </Button>
       </div>
+
+      {successMessage && <Alert variant="success" className="mb-3">{successMessage}</Alert>}
 
       {open && (
         <Card className="mb-3">
@@ -9210,10 +9259,17 @@ function HolidaysSection() {
         </Card>
       )}
 
-      {removeError && <Alert variant="error" className="mb-3">{removeError}</Alert>}
-
       <Card padding={false}>
-        {holidays.length === 0 ? (
+        {isReal && remoteHolidaysStatus === "loading" ? (
+          <LoadingState message="Loading public holidays…" />
+        ) : isReal && remoteHolidaysStatus === "error" ? (
+          <div className="p-6">
+            <ErrorState
+              message="Public holidays could not be loaded. Please try again."
+              onRetry={fetchRemoteHolidays}
+            />
+          </div>
+        ) : holidays.length === 0 ? (
           <div className="p-6">
             <EmptyState title="No public holidays" description="Add the days your office is closed." />
           </div>
@@ -9239,28 +9295,56 @@ function HolidaysSection() {
                   </div>
                 </div>
               ) : (
-                <div key={h.id} className="flex items-center gap-4 px-4 py-3">
-                  <p className="text-sm font-medium text-foreground w-32 flex-shrink-0 tabular-nums">{fmtDate(h.date)}</p>
-                  <p className="text-sm text-muted-foreground flex-1 min-w-0 truncate">{h.name}</p>
-                  <button
-                    onClick={() => openEdit(h)}
-                    className="text-xs text-primary hover:underline font-medium flex-shrink-0"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => handleRemove(h.id)}
-                    disabled={removingId === h.id}
-                    className="text-xs text-destructive hover:underline flex-shrink-0 disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    {removingId === h.id ? "Removing…" : "Remove"}
-                  </button>
+                <div key={h.id} className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-4 px-4 py-3">
+                  {/* Below sm: date sits alongside Edit/Remove on its own
+                      line, and the name gets the full row width on the line
+                      below — replacing the old single-line "truncate" (which
+                      cut names like "Coptic Christmas Day" down to
+                      "Copti…" at 375px) with a layout that has room to wrap
+                      instead. At sm+ this collapses back to one line via
+                      `sm:contents`, matching the original desktop layout
+                      exactly (same 3 gaps from the row's own gap-4). */}
+                  <div className="flex items-center justify-between gap-3 sm:contents">
+                    <p className="text-sm font-medium text-foreground sm:w-32 sm:flex-shrink-0 tabular-nums">{fmtDate(h.date)}</p>
+                    <div className="flex items-center gap-3 flex-shrink-0 sm:hidden">
+                      <button onClick={() => openEdit(h)} className="text-xs text-primary hover:underline font-medium">Edit</button>
+                      <button onClick={() => openRemoveConfirm(h)} className="text-xs text-destructive hover:underline">Remove</button>
+                    </div>
+                  </div>
+                  <p className="text-sm text-muted-foreground flex-1 min-w-0 line-clamp-2">{h.name}</p>
+                  <div className="hidden sm:flex items-center gap-4 flex-shrink-0">
+                    <button onClick={() => openEdit(h)} className="text-xs text-primary hover:underline font-medium">Edit</button>
+                    <button onClick={() => openRemoveConfirm(h)} className="text-xs text-destructive hover:underline">Remove</button>
+                  </div>
                 </div>
               )
             )}
           </div>
         )}
       </Card>
+
+      <Modal
+        open={!!removeTarget}
+        onClose={closeRemoveConfirm}
+        title="Remove Public Holiday?"
+        size="sm"
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to remove {removeTarget?.name} — {removeTarget ? fmtDate(removeTarget.date) : ""}?
+            This will remove it from future working-day calculations.
+          </p>
+          {removeError && <Alert variant="error">{removeError}</Alert>}
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" onClick={closeRemoveConfirm} disabled={removing}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleRemoveConfirm} loading={removing}>
+              Remove Holiday
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
