@@ -155,6 +155,13 @@ export const DEPARTMENTS = [
 ] as const;
 export type Department = (typeof DEPARTMENTS)[number];
 
+/** Demo-only, editable departments catalogue (HR Settings -> Departments), reusing the existing DEPARTMENTS names — separate from the plain string DEPARTMENTS list still used by the demo Employee form/filter. */
+export const DEFAULT_DEPARTMENTS: DepartmentRecord[] = DEPARTMENTS.map((name, i) => ({
+  id: `dept-${i + 1}`,
+  name,
+  status: "ACTIVE",
+}));
+
 export const DEFAULT_EMPLOYEES: EmployeeProfile[] = [
   { id: "EMP-00001", name: "Alex Morgan", firstName: "Alex", lastName: "Morgan", position: "Product Designer", department: "IT", email: "alex.morgan@company.com", phone: "+20 10 0000 0001", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", entitlements: { ANNUAL: 14, CASUAL: 7 }, permissionMinutesPerMonth: 240 },
   { id: "EMP-00002", name: "Jordan Lee", firstName: "Jordan", lastName: "Lee", position: "Engineering Manager", department: "IT", email: "jordan.lee@company.com", phone: "+20 10 0000 0002", status: "ACTIVE", managerId: "EMP-00008", role: "MANAGER", entitlements: { ANNUAL: 14, CASUAL: 7 }, permissionMinutesPerMonth: 240 },
@@ -674,10 +681,12 @@ export interface StoreData {
   leaveTypes: LeaveTypeRecord[];
   attendance: AttendanceRecord[];
   holidays: HolidayRecord[];
+  departments: DepartmentRecord[];
   nextSeq: number;
   nextEmpSeq: number;
   nextLeaveTypeSeq: number;
   nextHolidaySeq: number;
+  nextDepartmentSeq: number;
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
@@ -702,9 +711,11 @@ export function loadStore(): StoreData {
       if (!data.leaveTypes) data.leaveTypes = DEFAULT_LEAVE_TYPES;
       if (!data.attendance) data.attendance = [];
       if (!data.holidays) data.holidays = DEFAULT_HOLIDAYS;
+      if (!data.departments) data.departments = DEFAULT_DEPARTMENTS;
       if (!data.nextEmpSeq) data.nextEmpSeq = 10;
       if (!data.nextLeaveTypeSeq) data.nextLeaveTypeSeq = 7;
       if (!data.nextHolidaySeq) data.nextHolidaySeq = DEFAULT_HOLIDAYS.length + 1;
+      if (!data.nextDepartmentSeq) data.nextDepartmentSeq = DEFAULT_DEPARTMENTS.length + 1;
       return data;
     }
   } catch {}
@@ -715,10 +726,12 @@ export function loadStore(): StoreData {
     leaveTypes: DEFAULT_LEAVE_TYPES,
     attendance: [],
     holidays: DEFAULT_HOLIDAYS,
+    departments: DEFAULT_DEPARTMENTS,
     nextSeq: 1,
     nextEmpSeq: 10,
     nextLeaveTypeSeq: 7,
     nextHolidaySeq: DEFAULT_HOLIDAYS.length + 1,
+    nextDepartmentSeq: DEFAULT_DEPARTMENTS.length + 1,
   };
 }
 

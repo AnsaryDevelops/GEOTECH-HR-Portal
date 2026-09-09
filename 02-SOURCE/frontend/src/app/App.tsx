@@ -1829,8 +1829,19 @@ interface StoreContextValue {
    * if no allocation has been set yet — never a fabricated default.
    */
   fetchEmployeeLeaveAllocations: (profileId: string) => Promise<{ ANNUAL: number; CASUAL: number }>;
-  /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. */
+  /** Real, Supabase-backed departments — see supabase/migrations/20260906160000. Read by HREmployeesPage (Add/Edit form, filter) and DepartmentsSection, for a real session. */
   departments: DepartmentRecord[];
+  /**
+   * Status of the most recent `departments` fetch — same "loading" | "error"
+   * | "success" contract as remoteHolidaysStatus/remoteLeaveTypesStatus.
+   * DepartmentsSection uses this to tell "still loading" and "fetch failed"
+   * apart from "genuinely zero departments", for a real session only.
+   */
+  departmentsStatus: "loading" | "error" | "success";
+  /** Re-runs the departments fetch — used as the Departments error state's Retry action. */
+  fetchDepartments: () => Promise<void>;
+  /** Demo-only, editable departments catalogue — unconditionally `store.departments`. Only DepartmentsSection reads this, for a demo session; HREmployeesPage's demo path keeps using the plain DEPARTMENTS string list, unaffected. */
+  localDepartments: DepartmentRecord[];
   /** The singleton Technical Manager/General Manager routing slots — null values mean "not yet configured." */
   approvalRouting: { technicalManagerId: string | null; generalManagerId: string | null } | null;
   createLeaveRequest: (
@@ -2251,21 +2262,27 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   // string list exactly like remoteEmployees is kept separate from the local
   // demo roster: no destructive migration, no shared shape.
   const [departments, setDepartments] = useState<DepartmentRecord[]>([]);
+  const [departmentsStatus, setDepartmentsStatus] = useState<"loading" | "error" | "success">("loading");
 
   const fetchDepartments = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) {
       setDepartments([]);
+      setDepartmentsStatus("success");
       return;
     }
+    setDepartmentsStatus("loading");
     try {
       const { data, error } = await supabase.from("departments").select("id, name, status").order("name");
       if (error || !data) {
         setDepartments([]);
+        setDepartmentsStatus("error");
         return;
       }
       setDepartments(data as DepartmentRecord[]);
+      setDepartmentsStatus("success");
     } catch {
       setDepartments([]);
+      setDepartmentsStatus("error");
     }
   }, []);
 
@@ -3642,40 +3659,81 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     return { ok: true };
   }
 
-  // HR-only (departments_insert_hr RLS policy re-checks this server-side too
-  // — the frontend is never the security boundary). The partial unique index
-  // on (name) WHERE status = 'ACTIVE' is the real duplicate-name guard; this
-  // client-side check only gives a faster, friendlier error.
+  // Real path is HR-only (departments_insert_hr RLS re-checks this
+  // server-side too — the frontend is never the security boundary). The
+  // partial unique index on (name) WHERE status = 'ACTIVE' is the real
+  // duplicate-name guard; this client-side check only gives a faster,
+  // friendlier error. Demo path mirrors createHoliday/createLeaveType: a
+  // local, editable DepartmentRecord catalogue (store.departments, seeded
+  // from DEFAULT_DEPARTMENTS) — separate from the plain DEPARTMENTS string
+  // list the demo Employee form/filter still use, unaffected by this.
   async function createDepartment(name: string): Promise<{ ok: boolean; error?: string }> {
-    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
     const trimmed = name.trim();
     if (!trimmed) return { ok: false, error: "Name is required." };
-    if (departments.some((d) => d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
+
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      if (departments.some((d) => d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
+        return { ok: false, error: "An active department with this name already exists." };
+      }
+      const { error } = await supabase.from("departments").insert({ name: trimmed });
+      if (error) return { ok: false, error: error.message };
+      await fetchDepartments();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
+    if (store.departments.some((d) => d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
       return { ok: false, error: "An active department with this name already exists." };
     }
-    const { error } = await supabase.from("departments").insert({ name: trimmed });
-    if (error) return { ok: false, error: error.message };
-    await fetchDepartments();
+    mutate((p) => ({
+      ...p,
+      departments: [...p.departments, { id: `dept-${p.nextDepartmentSeq}`, name: trimmed, status: "ACTIVE" }],
+      nextDepartmentSeq: p.nextDepartmentSeq + 1,
+    }));
     return { ok: true };
   }
 
-  // Covers both rename (name) and archive/reactivate (status) — HR-only,
-  // departments_update_hr RLS policy re-checks server-side.
+  // Covers both rename (name) and archive/reactivate (status) — real path
+  // HR-only, departments_update_hr RLS re-checks server-side. Demo path
+  // mirrors updateHoliday/updateLeaveType.
   async function updateDepartment(id: string, updates: { name?: string; status?: "ACTIVE" | "INACTIVE" }): Promise<{ ok: boolean; error?: string }> {
-    if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+    if (updates.name !== undefined && !updates.name.trim()) {
+      return { ok: false, error: "Name is required." };
+    }
+
+    if (session && isRemoteEmployee(session.user.id)) {
+      if (!supabase) return { ok: false, error: "Supabase is not configured in this environment." };
+      if (updates.name !== undefined) {
+        const trimmed = updates.name.trim();
+        if (departments.some((d) => d.id !== id && d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
+          return { ok: false, error: "An active department with this name already exists." };
+        }
+      }
+      const patch: Record<string, unknown> = {};
+      if (updates.name !== undefined) patch.name = updates.name.trim();
+      if (updates.status !== undefined) patch.status = updates.status;
+      const { error } = await supabase.from("departments").update(patch).eq("id", id);
+      if (error) return { ok: false, error: error.message };
+      await fetchDepartments();
+      return { ok: true };
+    }
+
+    // Unchanged local demo path.
     if (updates.name !== undefined) {
       const trimmed = updates.name.trim();
-      if (!trimmed) return { ok: false, error: "Name is required." };
-      if (departments.some((d) => d.id !== id && d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
+      if (store.departments.some((d) => d.id !== id && d.status === "ACTIVE" && d.name.toLowerCase() === trimmed.toLowerCase())) {
         return { ok: false, error: "An active department with this name already exists." };
       }
     }
-    const patch: Record<string, unknown> = {};
-    if (updates.name !== undefined) patch.name = updates.name.trim();
-    if (updates.status !== undefined) patch.status = updates.status;
-    const { error } = await supabase.from("departments").update(patch).eq("id", id);
-    if (error) return { ok: false, error: error.message };
-    await fetchDepartments();
+    mutate((p) => ({
+      ...p,
+      departments: p.departments.map((d) =>
+        d.id === id
+          ? { ...d, ...(updates.name !== undefined ? { name: updates.name.trim() } : {}), ...(updates.status !== undefined ? { status: updates.status } : {}) }
+          : d
+      ),
+    }));
     return { ok: true };
   }
 
@@ -3707,7 +3765,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       employees, leaveTypes: store.leaveTypes, remoteLeaveTypes, remoteLeaveTypesStatus, fetchRemoteLeaveTypes,
       attendance: store.attendance, realAttendance, holidays: store.holidays, remoteHolidays, remoteHolidaysStatus, fetchRemoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
-      departments, approvalRouting,
+      departments, departmentsStatus, fetchDepartments, localDepartments: store.departments, approvalRouting,
       createLeaveRequest, submitRealLeaveRequest,
       createMissionRequest, submitRealMissionRequest,
       createPermissionRequest, submitRealPermissionRequest,
@@ -9355,15 +9413,41 @@ function HolidaysSection() {
 // historical employee/profile references intact and just removes the
 // department from future assignment.
 function DepartmentsSection() {
-  const { departments, createDepartment, updateDepartment } = useStore();
+  const { session } = useAuth();
+  const { departments: remoteDepartments, departmentsStatus, fetchDepartments, localDepartments, createDepartment, updateDepartment, isRemoteEmployee } = useStore();
+  // Real HR manages the real Supabase list; a local demo HR account manages
+  // its own editable local catalogue instead — same isolation rule as Phase
+  // 6B-1 Leave Types and Public Holidays. departmentsStatus only matters on
+  // the real path — the demo list is a synchronous local array, never
+  // "loading" or "errored".
+  const isReal = !!session && isRemoteEmployee(session.user.id);
+  const departments = isReal ? remoteDepartments : localDepartments;
+
   const [newName, setNewName] = useState("");
   const [addError, setAddError] = useState("");
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Page-level confirmation shown after a successful Add or Edit — cleared
+  // whenever another Add/Edit is started, so a stale message never lingers
+  // across a different operation.
+  const [successMessage, setSuccessMessage] = useState("");
 
   const [editTarget, setEditTarget] = useState<DepartmentRecord | null>(null);
   const [editName, setEditName] = useState("");
   const [editError, setEditError] = useState("");
+
+  // Archive/Activate — a proper handler (not fire-and-forget): tracks which
+  // row is in flight so a repeated click can't fire a second request for the
+  // same department, and surfaces a failure as a page-level Alert, matching
+  // Leave Types' handleToggleStatus.
+  const [toggleError, setToggleError] = useState("");
+  const [togglingId, setTogglingId] = useState("");
+
+  function toggleAddForm() {
+    setOpen((v) => !v);
+    setAddError("");
+    setSuccessMessage("");
+  }
 
   async function handleAdd() {
     setSaving(true);
@@ -9371,6 +9455,14 @@ function DepartmentsSection() {
     setSaving(false);
     if (!res.ok) { setAddError(res.error ?? "Could not add that department."); return; }
     setNewName(""); setAddError(""); setOpen(false);
+    setSuccessMessage("Department added successfully.");
+  }
+
+  function openEdit(d: DepartmentRecord) {
+    setEditTarget(d);
+    setEditName(d.name);
+    setEditError("");
+    setSuccessMessage("");
   }
 
   async function handleEdit() {
@@ -9380,6 +9472,15 @@ function DepartmentsSection() {
     setSaving(false);
     if (!res.ok) { setEditError(res.error ?? "Could not save changes."); return; }
     setEditTarget(null); setEditName(""); setEditError("");
+    setSuccessMessage("Department updated successfully.");
+  }
+
+  async function handleToggleStatus(d: DepartmentRecord) {
+    setToggleError("");
+    setTogglingId(d.id);
+    const res = await updateDepartment(d.id, { status: d.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" });
+    setTogglingId("");
+    if (!res.ok) setToggleError(res.error ?? "Could not update that department.");
   }
 
   return (
@@ -9391,15 +9492,18 @@ function DepartmentsSection() {
             Manage the departments employees can be assigned to.
           </p>
         </div>
-        <Button variant="secondary" onClick={() => { setOpen((v) => !v); setNewName(""); setAddError(""); }}>
+        <Button variant="secondary" onClick={toggleAddForm}>
           <Plus className="h-4 w-4" /> Add Department
         </Button>
       </div>
 
+      {successMessage && <Alert variant="success" className="mb-3">{successMessage}</Alert>}
+      {toggleError && <Alert variant="error" className="mb-3">{toggleError}</Alert>}
+
       {open && (
         <Card className="mb-3">
-          <div className="flex items-start gap-3">
-            <div className="flex-1">
+          <div className="flex flex-col sm:flex-row gap-3 items-start">
+            <div className="flex-1 w-full">
               <Input
                 placeholder="Department name"
                 value={newName}
@@ -9416,7 +9520,16 @@ function DepartmentsSection() {
       )}
 
       <Card padding={false}>
-        {departments.length === 0 ? (
+        {isReal && departmentsStatus === "loading" ? (
+          <LoadingState message="Loading departments…" />
+        ) : isReal && departmentsStatus === "error" ? (
+          <div className="p-6">
+            <ErrorState
+              message="Departments could not be loaded. Please try again."
+              onRetry={fetchDepartments}
+            />
+          </div>
+        ) : departments.length === 0 ? (
           <div className="p-6">
             <EmptyState icon={<Settings className="h-8 w-8 text-muted-foreground/40" />} title="No departments" description="Add a department to get started." />
           </div>
@@ -9426,8 +9539,8 @@ function DepartmentsSection() {
               <div key={d.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="flex-1 min-w-0">
                   {editTarget?.id === d.id ? (
-                    <div className="flex items-start gap-3">
-                      <div className="flex-1">
+                    <div className="flex flex-col sm:flex-row gap-3 items-start">
+                      <div className="flex-1 w-full">
                         <Input
                           value={editName}
                           onChange={(e) => { setEditName(e.target.value); setEditError(""); }}
@@ -9448,16 +9561,19 @@ function DepartmentsSection() {
                   <div className="flex items-center gap-3 flex-shrink-0">
                     <StatusBadge status={d.status === "ACTIVE" ? "active" : "inactive"} />
                     <button
-                      onClick={() => { setEditTarget(d); setEditName(d.name); setEditError(""); }}
+                      onClick={() => openEdit(d)}
                       className="text-xs text-primary hover:underline font-medium"
                     >
                       Edit
                     </button>
                     <button
-                      onClick={() => updateDepartment(d.id, { status: d.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" })}
-                      className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                      onClick={() => handleToggleStatus(d)}
+                      disabled={togglingId === d.id}
+                      className="text-xs text-muted-foreground hover:text-foreground hover:underline disabled:opacity-50 disabled:pointer-events-none"
                     >
-                      {d.status === "ACTIVE" ? "Archive" : "Activate"}
+                      {togglingId === d.id
+                        ? (d.status === "ACTIVE" ? "Archiving…" : "Activating…")
+                        : (d.status === "ACTIVE" ? "Archive" : "Activate")}
                     </button>
                   </div>
                 )}
