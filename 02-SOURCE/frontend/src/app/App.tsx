@@ -8210,6 +8210,40 @@ function HRAttendancePage() {
   const [saving, setSaving] = useState(false);
   const [filterMonth, setFilterMonth] = useState(currentMonthKey(new Date()));
 
+  // Attendance Excel upload — file selection only. No parsing, no import,
+  // no persistence yet; the file is only held in memory for the future
+  // "Preview Import" step. Accepts .xls/.xlsx by extension and by the two
+  // standard Excel MIME types (browsers/OSes are inconsistent about which
+  // MIME type they report for .xls, so the extension check is the primary
+  // signal and the MIME check is a secondary corroboration, not a gate).
+  const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [excelFileError, setExcelFileError] = useState("");
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
+  const EXCEL_MIME_TYPES = [
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ];
+
+  function handleExcelFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file after clearing
+    if (!file) return;
+    const isXlsExt = /\.(xls|xlsx)$/i.test(file.name);
+    const isExcelMime = file.type === "" || EXCEL_MIME_TYPES.includes(file.type);
+    if (!isXlsExt || !isExcelMime) {
+      setExcelFileError(`Unsupported file type: ${file.name}. Please select an .xls or .xlsx attendance file.`);
+      setExcelFile(null);
+      return;
+    }
+    setExcelFileError("");
+    setExcelFile(file);
+  }
+
+  function clearExcelFile() {
+    setExcelFile(null);
+    setExcelFileError("");
+  }
+
   // Same production-visibility rule as HREmployeesPage's directoryEmployees:
   // a real HR session only sees production-visible real profiles (legacy/test
   // profiles stay in the database, just excluded from this picker); a demo
@@ -8267,6 +8301,46 @@ function HRAttendancePage() {
           <div>
             <Button variant="primary" onClick={handleSave} loading={saving}>Save Record</Button>
           </div>
+        </div>
+      </Card>
+
+      <Card className="mb-6">
+        <div className="flex flex-col gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-foreground">Upload Attendance Excel</h3>
+            <p className="text-sm text-muted-foreground mt-1">
+              Select an exported attendance file (.xls or .xlsx). Import isn't available yet — this only selects the file.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <input
+              ref={excelFileInputRef}
+              type="file"
+              accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              onChange={handleExcelFileChange}
+              className="sr-only"
+              id="attendance-excel-file"
+            />
+            <Button variant="secondary" onClick={() => excelFileInputRef.current?.click()} className="gap-1.5">
+              <Upload className="h-4 w-4" /> Choose File
+            </Button>
+            {excelFile ? (
+              <span className="flex items-center gap-2 text-sm text-foreground">
+                {excelFile.name}
+                <button
+                  type="button"
+                  onClick={clearExcelFile}
+                  className="text-muted-foreground hover:text-foreground rounded-full p-0.5 hover:bg-muted transition-colors"
+                  aria-label={`Remove ${excelFile.name}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ) : (
+              <span className="text-sm text-muted-foreground">No file selected</span>
+            )}
+          </div>
+          {excelFileError && <Alert variant="error">{excelFileError}</Alert>}
         </div>
       </Card>
 
