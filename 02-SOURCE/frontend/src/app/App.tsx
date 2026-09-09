@@ -593,9 +593,11 @@ interface CalendarPopoverProps {
   value: string; // YYYY-MM-DD or ""
   onChange: (val: string) => void;
   onClose: () => void;
+  /** Optional YYYY-MM-DD floor — days before it render disabled/unselectable. Undefined = no restriction (existing behavior, unchanged). */
+  minDate?: string;
 }
 
-function CalendarPopover({ value, onChange, onClose }: CalendarPopoverProps) {
+function CalendarPopover({ value, onChange, onClose, minDate }: CalendarPopoverProps) {
   const today = new Date();
   const selected = value ? new Date(value + "T00:00:00") : null;
 
@@ -620,10 +622,17 @@ function CalendarPopover({ value, onChange, onClose }: CalendarPopoverProps) {
     else setViewMonth((m) => m + 1);
   }
 
-  function selectDay(day: number) {
+  function cellISODate(day: number): string {
     const m = String(viewMonth + 1).padStart(2, "0");
     const d = String(day).padStart(2, "0");
-    onChange(`${viewYear}-${m}-${d}`);
+    return `${viewYear}-${m}-${d}`;
+  }
+
+  const isDisabled = (day: number) => !!minDate && cellISODate(day) < minDate;
+
+  function selectDay(day: number) {
+    if (isDisabled(day)) return;
+    onChange(cellISODate(day));
     onClose();
   }
 
@@ -711,13 +720,15 @@ function CalendarPopover({ value, onChange, onClose }: CalendarPopoverProps) {
                 {day ? (
                   <button
                     type="button"
+                    disabled={isDisabled(day)}
                     onClick={() => selectDay(day)}
                     className={cn(
                       "h-8 w-8 rounded-full text-sm transition-colors",
-                      isSelected(day) && "bg-primary text-white font-semibold",
-                      !isSelected(day) && isToday(day) &&
+                      isDisabled(day) && "text-muted-foreground/30 cursor-not-allowed",
+                      !isDisabled(day) && isSelected(day) && "bg-primary text-white font-semibold",
+                      !isDisabled(day) && !isSelected(day) && isToday(day) &&
                         "font-semibold text-primary ring-1 ring-inset ring-primary/40",
-                      !isSelected(day) && !isToday(day) && "text-foreground hover:bg-muted"
+                      !isDisabled(day) && !isSelected(day) && !isToday(day) && "text-foreground hover:bg-muted"
                     )}
                   >
                     {day}
@@ -729,16 +740,22 @@ function CalendarPopover({ value, onChange, onClose }: CalendarPopoverProps) {
             ))}
           </div>
 
-          {/* Today shortcut */}
+          {/* Today shortcut — disabled too when today itself is before minDate */}
           <div className="mt-2 pt-2 border-t border-border flex justify-center">
             <button
               type="button"
+              disabled={!!minDate && toISODate(today) < minDate}
               onClick={() => {
                 setViewYear(today.getFullYear());
                 setViewMonth(today.getMonth());
                 selectDay(today.getDate());
               }}
-              className="text-xs text-primary hover:underline"
+              className={cn(
+                "text-xs",
+                minDate && toISODate(today) < minDate
+                  ? "text-muted-foreground/40 cursor-not-allowed"
+                  : "text-primary hover:underline"
+              )}
             >
               Today
             </button>
@@ -752,8 +769,8 @@ function CalendarPopover({ value, onChange, onClose }: CalendarPopoverProps) {
 // ─── Date Picker ─────────────────────────────────────────────────────────────
 
 export function DatePicker({
-  label, error, value, onChange, placeholder, className, id: idProp, ...props
-}: InputProps) {
+  label, error, value, onChange, placeholder, className, id: idProp, minDate, ...props
+}: InputProps & { /** Optional YYYY-MM-DD floor — earlier dates are disabled in the calendar. Undefined = no restriction (existing behavior, unchanged). */ minDate?: string }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const generatedId = useId();
@@ -811,7 +828,7 @@ export function DatePicker({
       </button>
 
       {/* Hidden input keeps the YYYY-MM-DD value accessible to native form APIs */}
-      <input type="date" value={value ?? ""} onChange={onChange} className="sr-only" tabIndex={-1} {...props} />
+      <input type="date" value={value ?? ""} onChange={onChange} min={minDate} className="sr-only" tabIndex={-1} {...props} />
 
       {error && (
         <p className="flex items-center gap-1.5 text-xs text-destructive" role="alert">
@@ -825,6 +842,7 @@ export function DatePicker({
           value={(value as string) ?? ""}
           onChange={handleCalendarChange}
           onClose={() => setOpen(false)}
+          minDate={minDate}
         />
       )}
     </div>
@@ -4818,6 +4836,34 @@ function LeaveRequestPage() {
   // used to authorize anything client-side.
   const requestedDays = countWorkingDays(startDate, endDate, isReal ? remoteHolidays : holidays);
 
+  // Minimum advance-notice policy (Phase 2 UX) — the selected Leave Type's
+  // own minimumNoticeDays (remoteLeaveTypes, the authoritative catalogue;
+  // never a hardcoded per-name mapping), translated into the earliest
+  // selectable calendar date: today + N calendar days, not working days.
+  // Demo path is unaffected — local leaveTypes never carries
+  // minimumNoticeDays, so this stays undefined there, same as before.
+  const selectedRealLeaveType = remoteLeaveTypes.find((lt) => lt.id === leaveType);
+  const minNoticeDays = selectedRealLeaveType?.minimumNoticeDays ?? 0;
+  const minStartDate = minNoticeDays > 0
+    ? (() => {
+        const d = new Date();
+        d.setDate(d.getDate() + minNoticeDays);
+        return toISODate(d);
+      })()
+    : undefined;
+
+  // If the Leave Type changes and the already-selected Start Date is no
+  // longer valid under the new notice requirement, clear it rather than
+  // leave an impossible selection in place — the calendar itself also
+  // disables it going forward (minDate below), so this only handles a date
+  // picked before the type changed.
+  useEffect(() => {
+    if (startDate && minStartDate && startDate < minStartDate) {
+      setStartDate("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minStartDate]);
+
   function clearErr(field: string) {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
   }
@@ -4854,17 +4900,10 @@ function LeaveRequestPage() {
     // immediate feedback — applies to the START DATE only, never the
     // requested duration. The real boundary is submit_leave_request's own
     // identical check; this cannot be bypassed by calling the RPC directly.
-    // 0/undefined minimumNoticeDays means no restriction (e.g. Emergency/Sick).
-    if (startDate) {
-      const selectedType = remoteLeaveTypes.find((lt) => lt.id === leaveType);
-      if (selectedType?.minimumNoticeDays) {
-        const earliest = new Date();
-        earliest.setDate(earliest.getDate() + selectedType.minimumNoticeDays);
-        if (startDate < toISODate(earliest)) {
-          const n = selectedType.minimumNoticeDays;
-          errs.startDate = `${selectedType.name} must be requested at least ${n} day${n === 1 ? "" : "s"} in advance.`;
-        }
-      }
+    // The calendar already disables invalid dates (minStartDate below), so
+    // this mainly guards a value set before the Leave Type changed.
+    if (startDate && minStartDate && startDate < minStartDate && selectedRealLeaveType) {
+      errs.startDate = `${selectedRealLeaveType.name} must be requested at least ${minNoticeDays} day${minNoticeDays === 1 ? "" : "s"} in advance.`;
     }
     return errs;
   }
@@ -4966,12 +5005,25 @@ function LeaveRequestPage() {
                       <option key={lt.id} value={lt.name}>{lt.name}</option>
                     ))}
               </Select>
+              {isReal && selectedRealLeaveType && (
+                <Alert variant="info">
+                  {minStartDate ? (
+                    <p>
+                      {selectedRealLeaveType.name} requires {minNoticeDays} day{minNoticeDays === 1 ? "" : "s"} advance notice
+                      {" · "}Earliest date: {fmtDate(minStartDate)}
+                    </p>
+                  ) : (
+                    <p>No advance notice is required for {selectedRealLeaveType.name}.</p>
+                  )}
+                </Alert>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <DatePicker
                   label="Start Date *"
                   value={startDate}
                   onChange={(e) => { setStartDate(e.target.value); clearErr("startDate"); }}
                   error={errors.startDate}
+                  minDate={minStartDate}
                 />
                 <DatePicker
                   label="End Date *"
