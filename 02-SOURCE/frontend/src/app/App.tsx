@@ -1779,6 +1779,17 @@ interface StoreContextValue {
   leaveTypes: LeaveTypeRecord[];
   /** Real, Supabase-backed leave types (Phase 6B-1) — see supabase/migrations/20260906130200_leave_types.sql. Only HRSettingsPage's management UI reads this, for a real HR session. */
   remoteLeaveTypes: LeaveTypeRecord[];
+  /**
+   * Status of the most recent remoteLeaveTypes fetch — "loading" while in
+   * flight (including the very first fetch after sign-in), "error" if it
+   * failed, "success" once remoteLeaveTypes reflects a real result (including
+   * a genuinely empty catalogue). HRSettingsPage uses this to tell "still
+   * loading" and "fetch failed" apart from "genuinely zero leave types" —
+   * before this field existed, remoteLeaveTypes === [] meant all three.
+   */
+  remoteLeaveTypesStatus: "loading" | "error" | "success";
+  /** Re-runs the remoteLeaveTypes fetch — used as the Leave Types error state's Retry action. */
+  fetchRemoteLeaveTypes: () => Promise<void>;
   attendance: AttendanceRecord[];
   /**
    * Real, Supabase-backed attendance (Phase 6B-10) — see
@@ -2283,19 +2294,21 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
 
   // Real, Supabase-backed leave types (Phase 6B-1) — exposed as its own
   // context field, deliberately separate from `leaveTypes` (which stays
-  // exactly `store.leaveTypes`, unconditionally local). Leave submission
-  // (createLeaveRequest/validateLeaveFields) is NOT part of this phase — it
-  // still reads and validates against the local list for every employee,
-  // real or demo, exactly as before. Only HRSettingsPage's management UI
-  // reads this new field, and only for a real HR session — see
-  // HRSettingsPage's own real-vs-demo switch.
+  // exactly `store.leaveTypes`, unconditionally local). The demo leave
+  // request path (createLeaveRequest/validateLeaveFields) reads the local
+  // `leaveTypes` list, unaffected by this fetch; the real leave request path
+  // (submitRealLeaveRequest, NewRequestPage's isReal branch) reads this
+  // field directly, same as HRSettingsPage's management UI.
   const [remoteLeaveTypes, setRemoteLeaveTypes] = useState<LeaveTypeRecord[]>([]);
+  const [remoteLeaveTypesStatus, setRemoteLeaveTypesStatus] = useState<"loading" | "error" | "success">("loading");
 
   const fetchRemoteLeaveTypes = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase) {
       setRemoteLeaveTypes([]);
+      setRemoteLeaveTypesStatus("success");
       return;
     }
+    setRemoteLeaveTypesStatus("loading");
     try {
       const { data, error } = await supabase
         .from("leave_types")
@@ -2303,6 +2316,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
         .order("name");
       if (error || !data) {
         setRemoteLeaveTypes([]);
+        setRemoteLeaveTypesStatus("error");
         return;
       }
       setRemoteLeaveTypes(
@@ -2314,8 +2328,10 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
           minimumNoticeDays: row.minimum_notice_days ?? 0,
         }))
       );
+      setRemoteLeaveTypesStatus("success");
     } catch {
       setRemoteLeaveTypes([]);
+      setRemoteLeaveTypesStatus("error");
     }
   }, []);
 
@@ -3675,7 +3691,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
   return (
     <StoreCtx.Provider value={{
       requests: store.requests, realRequests, notifications: store.notifications,
-      employees, leaveTypes: store.leaveTypes, remoteLeaveTypes,
+      employees, leaveTypes: store.leaveTypes, remoteLeaveTypes, remoteLeaveTypesStatus, fetchRemoteLeaveTypes,
       attendance: store.attendance, realAttendance, holidays: store.holidays, remoteHolidays,
       myLeaveAllocations, fetchEmployeeLeaveAllocations,
       departments, approvalRouting,
@@ -4327,11 +4343,17 @@ function useMyBalances() {
   const leaveMe = isReal ? { ...me, entitlements: myLeaveAllocations } : me;
   const myRequests = isReal ? realRequests : requests;
   const myAttendance = isReal ? realAttendance : attendance;
+  // myLeaveAllocations is itself only ever fetched for the current calendar
+  // year (fetchMyLeaveAllocations), so the used/held side of this balance
+  // must be scoped to that same year to mean anything — getAllLeaveBalances
+  // now requires a year explicitly, matching get_leave_balance's own
+  // extract(year FROM start_date) scoping server-side.
+  const leaveYear = new Date().getFullYear();
 
   return {
     me,
     month,
-    leave: leaveMe ? getAllLeaveBalances(leaveMe, myRequests) : [],
+    leave: leaveMe ? getAllLeaveBalances(leaveMe, myRequests, leaveYear) : [],
     permission: me ? getPermissionBalance(me, myRequests, myAttendance, month) : null,
   };
 }
@@ -4959,8 +4981,13 @@ function LeaveRequestPage() {
   const selectedDemoLeaveType = !isReal ? leaveTypes.find((lt) => lt.name === leaveType) : undefined;
   const selectedLeaveTypeRecord = isReal ? selectedRealLeaveType : selectedDemoLeaveType;
   const selectedBalanceKey = selectedLeaveTypeRecord?.balanceKey ?? null;
+  // Same year submit_leave_request will actually check
+  // (extract(year FROM p_start_date)): the Start Date already typed into
+  // the form, falling back to the current calendar year before any date is
+  // chosen — never every year's history summed together.
+  const selectedLeaveYear = startDate ? Number(startDate.slice(0, 4)) : new Date().getFullYear();
   const selectedBalance = me && selectedBalanceKey
-    ? getLeaveBalance(me, isReal ? realRequests : requests, selectedBalanceKey)
+    ? getLeaveBalance(me, isReal ? realRequests : requests, selectedBalanceKey, selectedLeaveYear)
     : null;
 
   function clearErr(field: string) {
@@ -8877,12 +8904,15 @@ function HRAttendancePage() {
 
 function HRSettingsPage() {
   const { session } = useAuth();
-  const { leaveTypes: localLeaveTypes, remoteLeaveTypes, createLeaveType, updateLeaveType, isRemoteEmployee } = useStore();
+  const { leaveTypes: localLeaveTypes, remoteLeaveTypes, remoteLeaveTypesStatus, fetchRemoteLeaveTypes, createLeaveType, updateLeaveType, isRemoteEmployee } = useStore();
   // TESTHR01-style real HR sees/manages the real Supabase catalog; a local
   // demo HR account (e.g. Riley Chen) keeps managing the existing local
   // list, completely unaffected — same isolation rule as every other
-  // Phase 6A/6A.1 real-vs-demo split.
-  const leaveTypes = session && isRemoteEmployee(session.user.id) ? remoteLeaveTypes : localLeaveTypes;
+  // Phase 6A/6A.1 real-vs-demo split. remoteLeaveTypesStatus only matters on
+  // the real path — the demo list is a synchronous local array, never
+  // "loading" or "errored".
+  const isReal = !!session && isRemoteEmployee(session.user.id);
+  const leaveTypes = isReal ? remoteLeaveTypes : localLeaveTypes;
 
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
@@ -8939,7 +8969,7 @@ function HRSettingsPage() {
   return (
     <DashboardShell activeNavId="settings" pageTitle="Settings">
       <div className="max-w-2xl">
-        <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-5">
           <div>
             <h2 className="text-lg font-semibold text-foreground">Leave Types</h2>
             <p className="text-sm text-muted-foreground mt-0.5">Manage the leave types available to employees.</p>
@@ -8949,21 +8979,24 @@ function HRSettingsPage() {
           </Button>
         </div>
 
-        {/* Add form inline */}
+        {/* Add form inline — grid stacks to one column below sm, so fields
+            stay full-width and readable instead of collapsing; Save/Cancel
+            sit on their own row rather than trying to align with a labeled
+            field row, which works at every width without extra breakpoints. */}
         {showAdd && (
           <Card className="mb-4">
             <p className="text-sm font-medium mb-3">New Leave Type</p>
-            <div className="flex items-start gap-3">
-              <div className="flex-1">
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <Input
+                  label="Name"
                   placeholder="Leave type name"
                   value={newName}
                   onChange={(e) => { setNewName(e.target.value); setAddError(""); }}
                   error={addError}
                 />
-              </div>
-              <div className="w-full sm:w-52">
                 <Select
+                  label="Balance"
                   value={newBalanceKey}
                   onChange={(e) => setNewBalanceKey(e.target.value as BalanceKey | "")}
                 >
@@ -8971,18 +9004,17 @@ function HRSettingsPage() {
                   <option value="ANNUAL">Charge annual balance</option>
                   <option value="CASUAL">Charge casual balance</option>
                 </Select>
-              </div>
-              <div className="w-full sm:w-40">
                 <Input
+                  label="Minimum Notice (days)"
                   type="number"
                   min={0}
                   step={1}
-                  placeholder="Notice (days)"
+                  placeholder="0"
                   value={newMinNotice}
                   onChange={(e) => setNewMinNotice(e.target.value)}
                 />
               </div>
-              <div className="flex gap-2 pt-0.5">
+              <div className="flex gap-2">
                 <Button variant="primary" onClick={handleAdd} loading={saving}>Save</Button>
                 <Button variant="secondary" onClick={() => setShowAdd(false)}>Cancel</Button>
               </div>
@@ -8993,7 +9025,16 @@ function HRSettingsPage() {
         {toggleError && <Alert variant="error" className="mb-4">{toggleError}</Alert>}
 
         <Card padding={false}>
-          {leaveTypes.length === 0 ? (
+          {isReal && remoteLeaveTypesStatus === "loading" ? (
+            <LoadingState message="Loading leave types…" />
+          ) : isReal && remoteLeaveTypesStatus === "error" ? (
+            <div className="p-6">
+              <ErrorState
+                message="Leave Types could not be loaded. Please try again."
+                onRetry={fetchRemoteLeaveTypes}
+              />
+            </div>
+          ) : leaveTypes.length === 0 ? (
             <div className="p-6">
               <EmptyState icon={<Settings className="h-8 w-8 text-muted-foreground/40" />} title="No leave types" description="Add a leave type to get started." />
             </div>
@@ -9003,17 +9044,17 @@ function HRSettingsPage() {
                 <div key={lt.id} className="flex items-center gap-4 px-4 py-3">
                   <div className="flex-1 min-w-0">
                     {editTarget?.id === lt.id ? (
-                      <div className="flex items-start gap-3">
-                        <div className="flex-1">
+                      <div className="flex flex-col gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <Input
+                            label="Name"
                             value={editName}
                             onChange={(e) => { setEditName(e.target.value); setEditError(""); }}
                             error={editError}
                             placeholder="Leave type name"
                           />
-                        </div>
-                        <div className="w-52">
                           <Select
+                            label="Balance"
                             value={editBalanceKey}
                             onChange={(e) => setEditBalanceKey(e.target.value as BalanceKey | "")}
                           >
@@ -9021,18 +9062,17 @@ function HRSettingsPage() {
                             <option value="ANNUAL">Charge annual balance</option>
                             <option value="CASUAL">Charge casual balance</option>
                           </Select>
-                        </div>
-                        <div className="w-40">
                           <Input
+                            label="Minimum Notice (days)"
                             type="number"
                             min={0}
                             step={1}
-                            placeholder="Notice (days)"
+                            placeholder="0"
                             value={editMinNotice}
                             onChange={(e) => setEditMinNotice(e.target.value)}
                           />
                         </div>
-                        <div className="flex gap-2 pt-0.5">
+                        <div className="flex gap-2">
                           <Button variant="primary" onClick={handleEdit} loading={saving}>Save</Button>
                           <Button variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
                         </div>

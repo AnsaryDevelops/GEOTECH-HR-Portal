@@ -537,15 +537,32 @@ export interface LeaveBalance {
   available: number; // what can still be requested
 }
 
+/**
+ * `year` scopes which requests count toward used/held, matching the
+ * server-authoritative get_leave_balance(profile_id, bucket, year) SQL
+ * function exactly (20260906150000_business_helper_functions.sql) — that
+ * function filters on extract(year FROM start_date) = p_year; a request
+ * from a different year never contributes here either. Callers pass the
+ * year the balance is actually being evaluated for (the relevant leave
+ * request's own start date, or the current calendar year for a general
+ * display) — never omitted, so this can't silently drift back to summing
+ * every year's history the way it used to.
+ */
 export function getLeaveBalance(
   employee: EmployeeProfile,
   requests: RequestRecord[],
-  key: BalanceKey
+  key: BalanceKey,
+  year: number
 ): LeaveBalance {
   const entitlement = employee.entitlements?.[key] ?? DEFAULT_ENTITLEMENTS[key];
 
   const mine = requests.filter(
-    (r) => r.employeeId === employee.id && r.type === "LEAVE" && r.balanceKey === key
+    (r) =>
+      r.employeeId === employee.id &&
+      r.type === "LEAVE" &&
+      r.balanceKey === key &&
+      !!r.startDate &&
+      Number(r.startDate.slice(0, 4)) === year
   );
 
   const sumDays = (list: RequestRecord[]) =>
@@ -566,10 +583,11 @@ export function getLeaveBalance(
 
 export function getAllLeaveBalances(
   employee: EmployeeProfile,
-  requests: RequestRecord[]
+  requests: RequestRecord[],
+  year: number
 ): LeaveBalance[] {
   return (Object.keys(BALANCE_LABEL) as BalanceKey[]).map((key) =>
-    getLeaveBalance(employee, requests, key)
+    getLeaveBalance(employee, requests, key, year)
   );
 }
 
@@ -880,7 +898,7 @@ export function validateLeaveFields(
       if (days === 0) {
         errors.startDate = "That range contains no working days. Weekends and public holidays do not count.";
       } else {
-        const balance = getLeaveBalance(balanceContext.employee, balanceContext.allRequests, key);
+        const balance = getLeaveBalance(balanceContext.employee, balanceContext.allRequests, key, Number(data.startDate.slice(0, 4)));
         if (days > balance.available) {
           const held = balance.held > 0 ? ` (${balance.held} more ${balance.held === 1 ? "day is" : "days are"} awaiting approval)` : "";
           errors.leaveType =
