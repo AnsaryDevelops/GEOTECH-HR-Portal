@@ -1539,7 +1539,7 @@ export function Header({
                 <button
                   role="menuitem"
                   type="button"
-                  className="flex w-full items-center px-3 py-2 mx-0 rounded-[6px] text-sm text-foreground hover:bg-muted transition-colors text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+                  className="flex w-full items-center px-3 py-2 mx-0 rounded-[6px] text-sm text-destructive hover:bg-muted transition-colors text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
                   onClick={() => { setMenuOpen(false); onLogoutClick?.(); }}
                 >
                   Sign Out
