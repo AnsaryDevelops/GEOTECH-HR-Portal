@@ -6618,6 +6618,7 @@ function ManagerRequestsPage() {
   const [filterEmployee, setFilterEmployee] = useState("");
   const [filterManager, setFilterManager] = useState("");
   const [filterType, setFilterType] = useState<"" | "LEAVE" | "MISSION">("");
+  const [filterStatus, setFilterStatus] = useState<"" | RequestStatus>("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
 
@@ -6638,12 +6639,13 @@ function ManagerRequestsPage() {
   // concept, per RequestRecord's own "Kept for display and filters" comment.
   const managerOptions = Array.from(new Set(myRequests.map((r) => r.managerName))).sort();
 
-  const hasFilters = !!(filterEmployee || filterManager || filterType || filterDateFrom || filterDateTo);
+  const hasFilters = !!(filterEmployee || filterManager || filterType || filterStatus || filterDateFrom || filterDateTo);
 
   function clearFilters() {
     setFilterEmployee("");
     setFilterManager("");
     setFilterType("");
+    setFilterStatus("");
     setFilterDateFrom("");
     setFilterDateTo("");
   }
@@ -6652,6 +6654,7 @@ function ManagerRequestsPage() {
     if (filterEmployee && r.employeeName !== filterEmployee) return false;
     if (filterManager && r.managerName !== filterManager) return false;
     if (filterType && r.type !== filterType) return false;
+    if (filterStatus && r.status !== filterStatus) return false;
     // Date range filters against the request's start date
     if (filterDateFrom && r.startDate && r.startDate < filterDateFrom) return false;
     if (filterDateTo && r.startDate && r.startDate > filterDateTo) return false;
@@ -6722,7 +6725,7 @@ function ManagerRequestsPage() {
         <div className="rounded-[12px] border border-border bg-card shadow-sm p-4 mb-5">
           <div className={cn(
             "grid grid-cols-1 sm:grid-cols-2 gap-3",
-            showManagerFilter ? "lg:grid-cols-5" : "lg:grid-cols-4"
+            showManagerFilter ? "lg:grid-cols-6" : "lg:grid-cols-5"
           )}>
             <Select
               label="Employee"
@@ -6771,6 +6774,17 @@ function ManagerRequestsPage() {
               onChange={(e) => setFilterDateTo(e.target.value)}
               placeholder="End of range"
             />
+
+            <Select
+              label="Status"
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value as "" | RequestStatus)}
+            >
+              <option value="">All Statuses</option>
+              <option value="PENDING">Pending</option>
+              <option value="APPROVED">Approved</option>
+              <option value="REJECTED">Rejected</option>
+            </Select>
           </div>
 
           {hasFilters && (
