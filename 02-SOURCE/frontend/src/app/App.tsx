@@ -4305,42 +4305,55 @@ function LeaveBalanceCard({ balance }: { balance: LeaveBalance }) {
 
 /**
  * Compact summary shown above the Leave Type field on the leave request form.
- * `balance` is the employee's existing ANNUAL LeaveBalance from getLeaveBalance()
- * — the same figure LeaveBalanceCard shows elsewhere — so the current unsaved
- * form never affects it. `requestedDays` is countWorkingDays() over the dates
- * currently typed into the form, kept entirely separate from the balance.
+ * `balance` is the selected Leave Type's own bucket (via its balanceKey) from
+ * getLeaveBalance() — the same figure LeaveBalanceCard shows elsewhere — so
+ * the current unsaved form never affects it; null when no type is selected
+ * yet or the selected type has no balanceKey. `requestedDays` is
+ * countWorkingDays() over the dates currently typed into the form, kept
+ * entirely separate from the balance.
  */
 function LeaveRequestBalanceSummary({
+  leaveTypeName,
   balance,
   requestedDays,
 }: {
+  /** Selected Leave Type's name, or undefined when none is selected yet. */
+  leaveTypeName?: string;
+  /** The selected type's balance, or null when it has no balanceKey (or none is selected). */
   balance: LeaveBalance | null;
   requestedDays: number;
 }) {
-  if (!balance) return null;
+  // Always the same outer card — only its inner content switches between the
+  // three states — so it never mounts/unmounts as the user changes Leave Type.
   return (
     <div className="rounded-[8px] border border-border bg-muted/30 p-4">
       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-        Leave Balance
+        {balance ? `${balance.label} Balance` : "Leave Balance"}
       </p>
-      <div className="flex flex-col sm:flex-row sm:items-baseline gap-3 sm:gap-0 sm:divide-x sm:divide-border">
-        <div className="flex items-baseline gap-1.5 sm:pr-5">
-          <span className="text-2xl font-semibold tabular-nums text-foreground">
-            {balance.available}
-          </span>
-          <span className="text-sm text-muted-foreground">
-            {balance.available === 1 ? "Day" : "Days"} remaining of {balance.entitlement} days allocated
-          </span>
+      {balance ? (
+        <div className="flex flex-col sm:flex-row sm:items-baseline gap-3 sm:gap-0 sm:divide-x sm:divide-border">
+          <div className="flex items-baseline gap-1.5 sm:pr-5">
+            <span className="text-2xl font-semibold tabular-nums text-foreground">
+              {balance.available}
+            </span>
+            <span className="text-sm text-muted-foreground">
+              {balance.available === 1 ? "Day" : "Days"} remaining of {balance.entitlement} days allocated
+            </span>
+          </div>
+          <div className="flex items-baseline gap-1.5 sm:pl-5">
+            <span className="text-2xl font-semibold tabular-nums text-foreground">
+              {requestedDays}
+            </span>
+            <span className="text-sm text-muted-foreground">
+              {requestedDays === 1 ? "Day" : "Days"} on leave requested
+            </span>
+          </div>
         </div>
-        <div className="flex items-baseline gap-1.5 sm:pl-5">
-          <span className="text-2xl font-semibold tabular-nums text-foreground">
-            {requestedDays}
-          </span>
-          <span className="text-sm text-muted-foreground">
-            {requestedDays === 1 ? "Day" : "Days"} on leave requested
-          </span>
-        </div>
-      </div>
+      ) : leaveTypeName ? (
+        <p className="text-sm text-muted-foreground">{leaveTypeName} is not limited by a leave balance.</p>
+      ) : (
+        <p className="text-sm text-muted-foreground">Select a leave type to view the applicable balance.</p>
+      )}
     </div>
   );
 }
@@ -4821,16 +4834,15 @@ function LeaveRequestPage() {
   // cannot show it yet, since the Requests read path is a later checkpoint.
   const [realResult, setRealResult] = useState<RequestRecord | null>(null);
 
-  // Same ANNUAL balance shown elsewhere (getLeaveBalance) — never adjusted by
-  // the current, unsaved form. requestedDays is a separate, live figure from
-  // the existing countWorkingDays(), computed from whatever dates are typed in.
-  // Real employee: entitlements comes from the real leave_allocations fetch
-  // (Phase 6B-3) instead of the hardcoded 0/0 every remote profile otherwise
-  // carries — display only; the RPC is authoritative for the actual balance
-  // check at submission time, never this client-side figure.
+  // requestedDays is a live figure from the existing countWorkingDays(),
+  // computed from whatever dates are typed in — independent of which Leave
+  // Type is selected. Real employee: entitlements comes from the real
+  // leave_allocations fetch (Phase 6B-3) instead of the hardcoded 0/0 every
+  // remote profile otherwise carries — display only; the RPC is
+  // authoritative for the actual balance check at submission time, never
+  // this client-side figure.
   const rawMe = employees.find((e) => e.id === session!.user.id) ?? null;
   const me = rawMe && isReal ? { ...rawMe, entitlements: myLeaveAllocations } : rawMe;
-  const annualBalance = me ? getLeaveBalance(me, isReal ? realRequests : requests, "ANNUAL") : null;
   // Real employee: the real Supabase holiday calendar, so this live preview
   // matches what the server will actually compute — display only, still not
   // used to authorize anything client-side.
@@ -4863,6 +4875,23 @@ function LeaveRequestPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minStartDate]);
+
+  // The balance card must follow the selected Leave Type's own
+  // balance_key/balanceKey — the existing field, already the source of
+  // truth for submit_leave_request — never a hardcoded per-name mapping.
+  // Demo path: leaveType holds the type's name (see the Select below), so
+  // it's looked up in the local leaveTypes catalogue instead of
+  // remoteLeaveTypes; both LeaveTypeRecord shapes already carry balanceKey.
+  // NULL balanceKey (Maternity/Paternity/Sick/Unpaid) means "not
+  // balance-limited" — the existing interpretation submit_leave_request
+  // already applies (no balance check at all) — so no card is shown for
+  // those, matching that behavior rather than inventing a bucket for them.
+  const selectedDemoLeaveType = !isReal ? leaveTypes.find((lt) => lt.name === leaveType) : undefined;
+  const selectedLeaveTypeRecord = isReal ? selectedRealLeaveType : selectedDemoLeaveType;
+  const selectedBalanceKey = selectedLeaveTypeRecord?.balanceKey ?? null;
+  const selectedBalance = me && selectedBalanceKey
+    ? getLeaveBalance(me, isReal ? realRequests : requests, selectedBalanceKey)
+    : null;
 
   function clearErr(field: string) {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
@@ -4989,7 +5018,11 @@ function LeaveRequestPage() {
           )}
           <form onSubmit={handleSubmit} noValidate>
             <div className="flex flex-col gap-5">
-              <LeaveRequestBalanceSummary balance={annualBalance} requestedDays={requestedDays} />
+              <LeaveRequestBalanceSummary
+                leaveTypeName={selectedLeaveTypeRecord?.name}
+                balance={selectedBalance}
+                requestedDays={requestedDays}
+              />
               <Select
                 label="Leave Type *"
                 value={leaveType}
