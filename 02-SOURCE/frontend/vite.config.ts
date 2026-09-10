@@ -5,8 +5,15 @@ import { defineConfig } from 'vite'
 
 export default defineConfig(({ command }) => ({
   // Relative asset paths on build so the produced folder can be opened
-  // directly from disk (file://) as a standalone demo.
-  base: command === 'build' ? './' : '/',
+  // directly from disk (file://) as a standalone demo. Vercel builds are the
+  // one exception: it rewrites every unknown path to /index.html (see
+  // vercel.json) so React Router can handle client-side routes, and a
+  // relative './assets/...' reference would then resolve against whatever
+  // nested path the browser is actually on (e.g. /hr/assets/...) instead of
+  // the real /assets/... location — process.env.VERCEL is set to '1' by
+  // Vercel's own build environment, never on a local/offline build, so this
+  // only changes behavior for the Vercel build itself.
+  base: command === 'build' ? (process.env.VERCEL ? '/' : './') : '/',
   plugins: [
     react(),
     tailwindcss(),
